@@ -3,7 +3,6 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCALA_DIR="$HERE/scala"
-SMITHY_DIR="$HERE/smithy"
 GENERATED_DIR="$SCALA_DIR/generated"
 SWIFT_DIR="$HERE/swift"
 BUILD_DIR="$HERE/build"
@@ -31,10 +30,24 @@ cs launch --contrib smithy4s -- generate \
   --resource-output "$BUILD_DIR/smithy-resources" \
   --dependencies tech.neander:jsonrpclib-smithy:0.1.2 \
   --skip resource \
-  "$SMITHY_DIR"
+  "$HERE/smithy"
+
+echo "==> Building Swift codegen plugin..."
+scala-cli --power publish local "$HERE/codegen/swift-plugin" \
+  --m2 \
+  --signer none
+
+echo "==> Generating Swift wire types from smithy..."
+SWIFT_GENERATED_DIR="$SWIFT_DIR/generated"
+mkdir -p "$SWIFT_GENERATED_DIR"
+
+cd "$HERE"
+cs launch --contrib smithy-cli -- build --allow-unknown-traits
+
+cp "$BUILD_DIR/smithy/source/swift-codegen/WireTypes.swift" "$SWIFT_GENERATED_DIR/WireTypes.swift"
 
 echo "==> Building Swift app..."
-swiftc -O "$SWIFT_DIR/main.swift" -o "$BUILD_DIR/ssr-app"
+swiftc -O "$SWIFT_DIR/main.swift" "$SWIFT_GENERATED_DIR/WireTypes.swift" -o "$BUILD_DIR/ssr-app"
 
 if [[ "$MODE" == "native" ]]; then
   NATIVE_BIN="$BUILD_DIR/ssr-scala-native"

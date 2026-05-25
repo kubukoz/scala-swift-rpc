@@ -1,33 +1,7 @@
 import AppKit
 import Foundation
 
-// MARK: - Wire types (mirror the smithy model on the Scala side)
-
-struct Node: Decodable {
-    let tag: String
-    let text: String?
-    let value: String?
-    let id: String?
-    let children: [Node]?
-}
-
-struct WindowSpec: Decodable {
-    let width: Double
-    let height: Double
-    let x: Double?
-    let y: Double?
-    let screen: String?
-}
-
-struct MountParams: Decodable {
-    let root: Node
-}
-
-struct PatchParams: Decodable {
-    let id: String
-    let op: String
-    let value: String?
-}
+// MARK: - Wire types: see swift/generated/WireTypes.swift (generated from smithy/ui.smithy)
 
 // MARK: - JSON-RPC bridge over LSP framing
 
@@ -204,50 +178,6 @@ private enum JSONValue: Codable {
     }
 }
 
-// MARK: - Method names (mirror the smithy operations)
-
-enum Methods {
-    static let mount = "ui/mount"
-    static let patch = "ui/patch"
-    static let window = "ui/window"
-    static let menu = "ui/menu"
-    static let quit = "ui/quit"
-
-    static let click = "event/click"
-    static let input = "event/input"
-    static let frame = "event/frame"
-}
-
-// MARK: - Event payloads
-
-struct ClickEvent: Encodable {
-    let id: String
-}
-struct InputEvent: Encodable {
-    let id: String
-    let value: String
-}
-struct FrameEvent: Encodable {
-    let x: Double
-    let y: Double
-    let width: Double
-    let height: Double
-}
-
-// MARK: - Menu types (mirror MenuItem in smithy)
-
-struct MenuItem: Decodable {
-    let title: String
-    let id: String?
-    let key: String?
-    let separator: Bool?
-    let children: [MenuItem]?
-}
-
-struct SetMenuParams: Decodable {
-    let menus: [MenuItem]
-}
-
 // MARK: - Renderer
 
 final class Renderer {
@@ -325,7 +255,7 @@ final class Renderer {
             button.bezelStyle = .rounded
             if let id = node.id {
                 button.onClick = { [weak self] in
-                    self?.bridge.sendNotification(method: Methods.click, params: ClickEvent(id: id))
+                    self?.bridge.sendNotification(method: Methods.click, params: ClickInput(id: id))
                 }
             }
             view = button
@@ -341,7 +271,7 @@ final class Renderer {
                 let delegate = TextFieldDelegate { [weak self] newValue in
                     self?.bridge.sendNotification(
                         method: Methods.input,
-                        params: InputEvent(id: id, value: newValue)
+                        params: InputInput(id: id, value: newValue)
                     )
                 }
                 field.delegate = delegate
@@ -437,16 +367,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bridge = JSONRPCBridge(executable: executable, arguments: arguments)
         renderer = Renderer(container: container, bridge: bridge)
 
-        bridge.on(Methods.mount) { [weak self] (params: MountParams) in
+        bridge.on(Methods.mount) { [weak self] (params: MountInput) in
             self?.renderer.mount(params.root)
         }
-        bridge.on(Methods.patch) { [weak self] (params: PatchParams) in
+        bridge.on(Methods.patch) { [weak self] (params: PatchInput) in
             self?.renderer.patch(id: params.id, op: params.op, value: params.value)
         }
-        bridge.on(Methods.window) { [weak self] (params: WindowSpec) in
+        bridge.on(Methods.window) { [weak self] (params: SetWindowInput) in
             self?.applyWindow(params)
         }
-        bridge.on(Methods.menu) { [weak self] (params: SetMenuParams) in
+        bridge.on(Methods.menu) { [weak self] (params: SetMenuInput) in
             self?.installMenu(params.menus)
         }
         bridge.on(Methods.quit) {
@@ -485,7 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
-    private func applyWindow(_ spec: WindowSpec) {
+    private func applyWindow(_ spec: SetWindowInput) {
         let wasVisible = window.isVisible
         let size = NSSize(width: spec.width, height: spec.height)
         let screen = resolveScreen(spec.screen) ?? window.screen ?? NSScreen.main
@@ -515,7 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let f = window.frame
         bridge.sendNotification(
             method: Methods.frame,
-            params: FrameEvent(
+            params: WindowFrame(
                 x: Double(f.origin.x),
                 y: Double(f.origin.y),
                 width: Double(f.size.width),
@@ -548,7 +478,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.keyEquivalentModifierMask = modifiers
         if let id = spec.id {
             item.onSelect = { [weak self] in
-                self?.bridge.sendNotification(method: Methods.click, params: ClickEvent(id: id))
+                self?.bridge.sendNotification(method: Methods.click, params: ClickInput(id: id))
             }
         }
         if let kids = spec.children, !kids.isEmpty {
