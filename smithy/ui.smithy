@@ -1,6 +1,6 @@
 $version: "2.0"
 
-namespace htmxpoc.ui
+namespace ssr.internal.protocol
 
 use jsonrpclib#jsonRpc
 use jsonrpclib#jsonRpcNotification

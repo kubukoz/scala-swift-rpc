@@ -1,9 +1,9 @@
-package htmxpoc
+package ssr
 
 import cats.effect.*
 import cats.syntax.all.*
-import htmxpoc.ui.Node
-import htmxpoc.ui.UiCommands
+import ssr.internal.protocol.Node
+import ssr.internal.protocol.UiCommands
 
 // NodeBuilder owns mutable state and emits targeted patches whenever it
 // mutates after the initial mount.

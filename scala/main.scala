@@ -1,4 +1,4 @@
-package htmxpoc
+package ssr
 
 import cats.effect.*
 import cats.effect.syntax.all.*
@@ -8,10 +8,10 @@ import fs2.concurrent.Signal
 import fs2.concurrent.SignallingRef
 import fs2.io.file.Files
 import fs2.io.file.Path
-import htmxpoc.ui.MenuItem
-import htmxpoc.ui.SetWindowInput
-import htmxpoc.ui.UiEvents
-import htmxpoc.ui.WindowFrame
+import ssr.internal.protocol.MenuItem
+import ssr.internal.protocol.SetWindowInput
+import ssr.internal.protocol.UiEvents
+import ssr.internal.protocol.WindowFrame
 import io.circe.Printer
 import io.circe.parser
 import jsonrpclib.fs2.FS2Channel
@@ -28,7 +28,7 @@ object App {
   private val frameCodec: io.circe.Codec[WindowFrame] = CirceJsonCodec.fromSchema[WindowFrame]
 
   private val stateDir: Path =
-    Path(java.lang.System.getProperty("user.home")) / ".local" / "state" / "htmx-poc"
+    Path(java.lang.System.getProperty("user.home")) / ".local" / "state" / "ssr"
 
   private val stateFile: Path = stateDir / "window.json"
 
@@ -82,17 +82,17 @@ object Main extends IOApp.Simple {
             ),
           )
         ),
-        component = ssr.vstack(
+        component = ui.vstack(
           (
-            ssr.label("Type below — the label mirrors the field:"),
-            ssr.hstack(
+            ui.label("Type below — the label mirrors the field:"),
+            ui.hstack(
               (
-                ssr.textfield((onInput(state.set), attrs.value <-- state)),
-                ssr.label(state: Signal[IO, String]),
+                ui.textfield((onInput(state.set), attrs.value <-- state)),
+                ui.label(state: Signal[IO, String]),
               )
             ),
-            ssr.label(sizeLabel),
-            ssr.button(("Quit", onClick(ctx.emit.quit().void))),
+            ui.label(sizeLabel),
+            ui.button(("Quit", onClick(ctx.emit.quit().void))),
           )
         ),
       )

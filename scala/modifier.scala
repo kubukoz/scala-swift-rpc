@@ -1,4 +1,4 @@
-package htmxpoc
+package ssr
 
 import cats.effect.*
 import cats.effect.syntax.all.*

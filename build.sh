@@ -34,10 +34,10 @@ cs launch --contrib smithy4s -- generate \
   "$SMITHY_DIR"
 
 echo "==> Building Swift app..."
-swiftc -O "$SWIFT_DIR/main.swift" -o "$BUILD_DIR/htmx-poc-app"
+swiftc -O "$SWIFT_DIR/main.swift" -o "$BUILD_DIR/ssr-app"
 
 if [[ "$MODE" == "native" ]]; then
-  NATIVE_BIN="$BUILD_DIR/htmx-poc-scala-native"
+  NATIVE_BIN="$BUILD_DIR/ssr-scala-native"
   echo "==> Building Scala Native binary..."
   scala-cli --power package "$SCALA_DIR" \
     --native \

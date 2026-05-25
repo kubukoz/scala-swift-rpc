@@ -416,7 +416,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Scala-driven UI POC"
+        window.title = "SSR"
 
         let container = NSStackView()
         container.orientation = .vertical

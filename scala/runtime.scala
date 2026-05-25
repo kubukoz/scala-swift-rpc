@@ -1,11 +1,11 @@
-package htmxpoc
+package ssr
 
 import cats.effect.*
 import cats.syntax.all.*
 import fs2.concurrent.Signal
-import htmxpoc.ui.UiCommands
-import htmxpoc.ui.UiCommandsGen
-import htmxpoc.ui.WindowFrame
+import ssr.internal.protocol.UiCommands
+import ssr.internal.protocol.UiCommandsGen
+import ssr.internal.protocol.WindowFrame
 import jsonrpclib.fs2.FS2Channel
 import jsonrpclib.fs2.catsMonadic
 import jsonrpclib.smithy4sinterop.ClientStub
