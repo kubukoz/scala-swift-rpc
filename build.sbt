@@ -158,9 +158,6 @@ lazy val ssr = (projectMatrix in file("scala/lib"))
   .jvmPlatform(scalaVersions = Seq("3.8.3"))
   .nativePlatform(
     scalaVersions = Seq("3.8.3"),
-    settings = Seq(
-      nativeConfig ~= { _.withMode(scalanative.build.Mode.releaseFast) },
-    ),
   )
 
 lazy val demos = (projectMatrix in file("scala/demos"))
@@ -178,9 +175,6 @@ lazy val demos = (projectMatrix in file("scala/demos"))
   .jvmPlatform(scalaVersions = Seq("3.8.3"))
   .nativePlatform(
     scalaVersions = Seq("3.8.3"),
-    settings = Seq(
-      nativeConfig ~= { _.withMode(scalanative.build.Mode.releaseFast) },
-    ),
   )
 
 lazy val demosJVM    = demos.jvm("3.8.3")
