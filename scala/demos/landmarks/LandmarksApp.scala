@@ -9,9 +9,7 @@ import ssr.*
 import ssr.internal.protocol.MenuItem
 import ssr.internal.protocol.SetWindowInput
 
-object LandmarksMain extends IOApp.Simple {
-
-  def run: IO[Unit] = App.bootstrap(landmarksApp)
+object LandmarksMain extends SSRApp {
 
   private val DefaultWidth = 1100.0
   private val DefaultHeight = 720.0
@@ -22,7 +20,7 @@ object LandmarksMain extends IOApp.Simple {
     )
   )
 
-  private def landmarksApp(ctx: SSR): Resource[IO, App] =
+  def render(ctx: SSR): Resource[IO, App] =
     for {
       initialFrame <- App.loadFrame.toResource
       initialLandmarks <- LandmarkLoader.loadAll(assetsDir / "landmarkData.json").toResource

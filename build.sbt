@@ -8,7 +8,8 @@ val smithyVersion = "1.71.0"
 
 lazy val root = (project in file("."))
   .aggregate(swiftCodegen)
-  .aggregate(scalaApp.projectRefs *)
+  .aggregate(ssr.projectRefs *)
+  .aggregate(demos.projectRefs *)
   .settings(
     name := "ssr-root",
     publish / skip := true,
@@ -111,36 +112,67 @@ swiftBuild := {
 }
 
 // ---------------------------------------------------------------------------
-// Scala app (UI components + JSON-RPC client). projectmatrix: JVM + Native axes.
+// Scala modules. projectmatrix: JVM + Native axes.
+//   ssr   — library (component tree, FRP runtime, JSON-RPC client/server)
+//   demos — demo apps (landmarks, mirror) built against the library
 // ---------------------------------------------------------------------------
 
 lazy val mainClassName = "ssr.landmarks.LandmarksMain"
 
-lazy val scalaApp = (projectMatrix in file("scala"))
+def excludeAxisTarget(srcDir: File): FileFilter => FileFilter = prev => {
+  // scalaSource is the project root, which also contains the per-axis target/
+  // directories. Exclude target/ so each axis only sees the hand-written sources.
+  val target = (srcDir / "target").getAbsolutePath
+  prev || new SimpleFileFilter(_.getAbsolutePath.startsWith(target))
+}
+
+lazy val commonScalaSettings = Seq(
+  scalacOptions ++= Seq("-Wconf:cat=deprecation:silent"),
+  libraryDependencies ++= Seq(
+    "tech.neander" %%% "jsonrpclib-fs2" % jsonrpclibVersion,
+    "tech.neander" %%% "jsonrpclib-smithy4s" % jsonrpclibVersion,
+    "com.disneystreaming.smithy4s" %%% "smithy4s-core" % smithy4sVersion,
+    "com.disneystreaming.smithy4s" %%% "smithy4s-json" % smithy4sVersion,
+    "io.circe" %%% "circe-parser" % "0.14.15",
+    "org.typelevel" %%% "cats-effect" % "3.7.0",
+    "co.fs2" %%% "fs2-core" % "3.13.0",
+    "co.fs2" %%% "fs2-io" % "3.13.0",
+  ),
+)
+
+lazy val ssr = (projectMatrix in file("scala/lib"))
   .enablePlugins(Smithy4sCodegenPlugin)
+  .settings(commonScalaSettings)
   .settings(
-    name := "ssr-scala",
-    Compile / scalaSource := (ThisBuild / baseDirectory).value / "scala",
-    // scalaSource is the project root, which also contains the per-axis target/
-    // directories. Exclude target/ so each axis only sees the hand-written sources.
-    Compile / unmanagedSources / excludeFilter := {
-      val target = ((ThisBuild / baseDirectory).value / "scala" / "target").getAbsolutePath
-      val prev = (Compile / unmanagedSources / excludeFilter).value
-      prev || new SimpleFileFilter(_.getAbsolutePath.startsWith(target))
-    },
-    scalacOptions ++= Seq("-Wconf:cat=deprecation:silent"),
+    name := "ssr",
+    Compile / scalaSource := (ThisBuild / baseDirectory).value / "scala" / "lib",
+    Compile / unmanagedSources / excludeFilter :=
+      excludeAxisTarget((ThisBuild / baseDirectory).value / "scala" / "lib")(
+        (Compile / unmanagedSources / excludeFilter).value
+      ),
     Compile / smithy4sInputDirs := Seq((ThisBuild / smithySourceDir).value),
     libraryDependencies ++= Seq(
-      "tech.neander" %%% "jsonrpclib-fs2" % jsonrpclibVersion,
-      "tech.neander" %%% "jsonrpclib-smithy4s" % jsonrpclibVersion,
       "tech.neander" % "jsonrpclib-smithy" % jsonrpclibVersion % Smithy4s,
-      "com.disneystreaming.smithy4s" %%% "smithy4s-core" % smithy4sVersion,
-      "com.disneystreaming.smithy4s" %%% "smithy4s-json" % smithy4sVersion,
-      "io.circe" %%% "circe-parser" % "0.14.15",
-      "org.typelevel" %%% "cats-effect" % "3.7.0",
-      "co.fs2" %%% "fs2-core" % "3.13.0",
-      "co.fs2" %%% "fs2-io" % "3.13.0",
     ),
+  )
+  .jvmPlatform(scalaVersions = Seq("3.8.3"))
+  .nativePlatform(
+    scalaVersions = Seq("3.8.3"),
+    settings = Seq(
+      nativeConfig ~= { _.withMode(scalanative.build.Mode.releaseFast) },
+    ),
+  )
+
+lazy val demos = (projectMatrix in file("scala/demos"))
+  .dependsOn(ssr)
+  .settings(commonScalaSettings)
+  .settings(
+    name := "ssr-demos",
+    Compile / scalaSource := (ThisBuild / baseDirectory).value / "scala" / "demos",
+    Compile / unmanagedSources / excludeFilter :=
+      excludeAxisTarget((ThisBuild / baseDirectory).value / "scala" / "demos")(
+        (Compile / unmanagedSources / excludeFilter).value
+      ),
     Compile / mainClass := Some(mainClassName),
   )
   .jvmPlatform(scalaVersions = Seq("3.8.3"))
@@ -151,8 +183,8 @@ lazy val scalaApp = (projectMatrix in file("scala"))
     ),
   )
 
-lazy val scalaAppJVM    = scalaApp.jvm("3.8.3")
-lazy val scalaAppNative = scalaApp.native("3.8.3")
+lazy val demosJVM    = demos.jvm("3.8.3")
+lazy val demosNative = demos.native("3.8.3")
 
 
 // ---------------------------------------------------------------------------
@@ -178,7 +210,7 @@ runJVM := {
   val baseDir = (ThisBuild / baseDirectory).value
   // The Swift parent expects a single executable in SCALA_APP_BIN, so stage a
   // tiny shim that exec's `java -cp ... <main>` for it.
-  val cp = (scalaAppJVM / Compile / fullClasspath).value.map(_.data).mkString(java.io.File.pathSeparator)
+  val cp = (demosJVM / Compile / fullClasspath).value.map(_.data).mkString(java.io.File.pathSeparator)
   val javaBin = sys.props.getOrElse("java.home", sys.error("java.home missing")) + "/bin/java"
   val shim = baseDir / "build" / "scala-jvm-shim.sh"
   IO.createDirectory(shim.getParentFile)
@@ -194,6 +226,6 @@ runJVM := {
 
 runNative := {
   val host = swiftBuild.value
-  val nativeBin = (scalaAppNative / Compile / nativeLink).value
+  val nativeBin = (demosNative / Compile / nativeLink).value
   launchHost(host, nativeBin, streams.value.log, (ThisBuild / baseDirectory).value)
 }

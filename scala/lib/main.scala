@@ -101,6 +101,11 @@ object App {
   }
 }
 
+trait SSRApp extends IOApp.Simple {
+  def render(ctx: SSR): Resource[IO, App]
+  final def run: IO[Unit] = App.bootstrap(render)
+}
+
 private[ssr] object Main {
 
   def eventService(

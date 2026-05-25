@@ -7,11 +7,9 @@ import ssr.*
 import ssr.internal.protocol.MenuItem
 import ssr.internal.protocol.SetWindowInput
 
-object MirrorMain extends IOApp.Simple {
+object MirrorMain extends SSRApp {
 
-  def run: IO[Unit] = App.bootstrap(mirrorApp)
-
-  private def mirrorApp(ctx: SSR): Resource[IO, App] =
+  def render(ctx: SSR): Resource[IO, App] =
     for {
       initial <- App.loadFrame.toResource
       state <- SignallingRef.of[IO, String]("").toResource
