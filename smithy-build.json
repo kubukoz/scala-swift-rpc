@@ -4,7 +4,8 @@
   "outputDirectory": "build/smithy",
   "maven": {
     "dependencies": [
-      "ssr:swift-codegen_3:0.1.0-SNAPSHOT"
+      "ssr:swift-codegen_3:0.1.0-SNAPSHOT",
+      "tech.neander:jsonrpclib-smithy:0.1.2"
     ]
   },
   "plugins": {
