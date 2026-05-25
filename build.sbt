@@ -1,4 +1,6 @@
-ThisBuild / scalaVersion := "3.8.3"
+val scala3Version = "3.8.3"
+
+ThisBuild / scalaVersion := scala3Version
 ThisBuild / organization := "ssr"
 ThisBuild / version      := "0.1.0-SNAPSHOT"
 
@@ -155,9 +157,9 @@ lazy val ssr = (projectMatrix in file("scala/lib"))
       "tech.neander" % "jsonrpclib-smithy" % jsonrpclibVersion % Smithy4s,
     ),
   )
-  .jvmPlatform(scalaVersions = Seq("3.8.3"))
+  .jvmPlatform(scalaVersions = Seq(scala3Version))
   .nativePlatform(
-    scalaVersions = Seq("3.8.3"),
+    scalaVersions = Seq(scala3Version),
   )
 
 lazy val demos = (projectMatrix in file("scala/demos"))
@@ -172,13 +174,13 @@ lazy val demos = (projectMatrix in file("scala/demos"))
       ),
     Compile / mainClass := Some(mainClassName),
   )
-  .jvmPlatform(scalaVersions = Seq("3.8.3"))
+  .jvmPlatform(scalaVersions = Seq(scala3Version))
   .nativePlatform(
-    scalaVersions = Seq("3.8.3"),
+    scalaVersions = Seq(scala3Version),
   )
 
-lazy val demosJVM    = demos.jvm("3.8.3")
-lazy val demosNative = demos.native("3.8.3")
+lazy val demosJVM    = demos.jvm(scala3Version)
+lazy val demosNative = demos.native(scala3Version)
 
 
 // ---------------------------------------------------------------------------
