@@ -1,19 +1,29 @@
 import AppKit
 import Foundation
+import JSONRPC
+import LanguageServerProtocol
+import UniformTypeIdentifiers
 
 // MARK: - Wire types: see swift/generated/WireTypes.swift (generated from smithy/ui.smithy)
 
 // MARK: - JSON-RPC bridge over LSP framing
+//
+// Thin wrapper around ChimeHQ/JSONRPC's JSONRPCSession. The session owns id
+// allocation, the pending-response table, and request/response correlation.
+// We provide a small registry of notification + request handlers and a loop
+// that drains the session's event stream and dispatches by method name.
 
 final class JSONRPCBridge {
     private let process = Process()
     private let stdinPipe = Pipe()
     private let stdoutPipe = Pipe()
-    private var buffer = Data()
-    private let stdinQueue = DispatchQueue(label: "jsonrpc.stdin")
+    private let session: JSONRPCSession
 
     typealias NotificationHandler = (Data) -> Void
-    private var handlers: [String: NotificationHandler] = [:]
+    typealias RequestHandler = (Data) async throws -> Data
+
+    private var notificationHandlers: [String: NotificationHandler] = [:]
+    private var requestHandlers: [String: RequestHandler] = [:]
 
     init(executable: String, arguments: [String]) {
         process.executableURL = URL(fileURLWithPath: executable)
@@ -21,10 +31,13 @@ final class JSONRPCBridge {
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = FileHandle.standardError
+
+        let channel = JSONRPCBridge.makeChannel(stdin: stdinPipe, stdout: stdoutPipe)
+        self.session = JSONRPCSession(channel: channel.withMessageFraming())
     }
 
     func on<P: Decodable>(_ method: String, _ handler: @escaping (P) -> Void) {
-        handlers[method] = { data in
+        notificationHandlers[method] = { data in
             do {
                 let params = try JSONDecoder().decode(P.self, from: data)
                 DispatchQueue.main.async { handler(params) }
@@ -36,145 +49,129 @@ final class JSONRPCBridge {
 
     // Methods with no params or unit params.
     func on(_ method: String, _ handler: @escaping () -> Void) {
-        handlers[method] = { _ in
+        notificationHandlers[method] = { _ in
             DispatchQueue.main.async { handler() }
         }
     }
 
+    // Registers a request handler. Called by codegen-emitted typed wrappers
+    // (e.g. `onOpenPanel`) — see swift/generated/WireTypes.swift.
+    func registerRequest(_ method: String, _ handler: @escaping RequestHandler) {
+        requestHandlers[method] = handler
+    }
+
     func start() throws {
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            guard let self = self else { return }
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            self.consume(data)
-        }
         try process.run()
+        Task { [weak self] in await self?.run() }
     }
 
     func terminate() {
         process.terminate()
     }
 
-    func sendNotification<P: Encodable>(method: String, params: P) {
-        let envelope = NotificationEnvelope(jsonrpc: "2.0", method: method, params: params)
-        guard let body = try? JSONEncoder().encode(envelope) else { return }
-        let header = "Content-Length: \(body.count)\r\n\r\n".data(using: .ascii)!
-        stdinQueue.async { [weak self] in
-            self?.stdinPipe.fileHandleForWriting.write(header)
-            self?.stdinPipe.fileHandleForWriting.write(body)
+    func sendNotification<P: Encodable & Sendable>(method: String, params: P) {
+        let session = self.session
+        Task {
+            do {
+                try await session.sendNotification(params, method: method)
+            } catch {
+                FileHandle.standardError.write("sendNotification \(method) failed: \(error)\n".data(using: .utf8)!)
+            }
         }
     }
 
     func sendNotification(method: String) {
-        struct Empty: Encodable {}
-        sendNotification(method: method, params: Empty())
-    }
-
-    // MARK: - Decoding
-
-    private struct NotificationEnvelope<P: Encodable>: Encodable {
-        let jsonrpc: String
-        let method: String
-        let params: P
-    }
-
-    private func consume(_ data: Data) {
-        buffer.append(data)
-        while let frame = takeFrame() {
-            dispatch(frame)
-        }
-    }
-
-    private func takeFrame() -> Data? {
-        guard let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)) else { return nil }
-        let headerData = buffer.subdata(in: 0..<headerEnd.lowerBound)
-        guard let headerString = String(data: headerData, encoding: .ascii) else {
-            buffer.removeSubrange(0..<headerEnd.upperBound)
-            return nil
-        }
-        var contentLength: Int = -1
-        for line in headerString.split(separator: "\r\n", omittingEmptySubsequences: true) {
-            let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            if parts.count == 2 && parts[0].lowercased() == "content-length" {
-                contentLength = Int(parts[1]) ?? -1
+        let session = self.session
+        Task {
+            do {
+                try await session.sendNotification(method: method)
+            } catch {
+                FileHandle.standardError.write("sendNotification \(method) failed: \(error)\n".data(using: .utf8)!)
             }
         }
-        guard contentLength >= 0 else {
-            buffer.removeSubrange(0..<headerEnd.upperBound)
-            return nil
-        }
-        let bodyStart = headerEnd.upperBound
-        let bodyEnd = bodyStart + contentLength
-        guard buffer.count >= bodyEnd else { return nil }
-        let body = buffer.subdata(in: bodyStart..<bodyEnd)
-        buffer.removeSubrange(0..<bodyEnd)
-        return body
     }
 
-    private func dispatch(_ frame: Data) {
-        guard let envelope = try? JSONDecoder().decode(GenericEnvelope.self, from: frame),
-              let method = envelope.method else {
-            FileHandle.standardError.write("Frame without method: \(String(data: frame, encoding: .utf8) ?? "?")\n".data(using: .utf8)!)
-            return
+    // Drain incoming events from the JSONRPCSession and route by method name.
+    // The library hands us the whole envelope's bytes in `data`; we re-encode
+    // just the typed `params: JSONValue` so the typed handler sees the inner
+    // params object, not the outer JSON-RPC envelope.
+    private func run() async {
+        let encoder = JSONEncoder()
+        for await event in await session.eventSequence {
+            switch event {
+            case .notification(let note, _):
+                guard let handler = notificationHandlers[note.method] else {
+                    FileHandle.standardError.write("No notification handler for \(note.method)\n".data(using: .utf8)!)
+                    continue
+                }
+                let paramsData = (try? encoder.encode(note.params)) ?? Data("{}".utf8)
+                handler(paramsData)
+            case .request(let req, let respond, _):
+                let method = req.method
+                guard let handler = requestHandlers[method] else {
+                    let err = AnyJSONRPCResponseError(code: -32601, message: "Method not found: \(method)")
+                    await respond(.failure(err))
+                    continue
+                }
+                let paramsData = (try? encoder.encode(req.params)) ?? Data("{}".utf8)
+                do {
+                    let resultData = try await handler(paramsData)
+                    let shim = RawEncodable(data: resultData)
+                    await respond(.success(shim))
+                } catch {
+                    let err = AnyJSONRPCResponseError(
+                        code: -32603,
+                        message: "Handler for \(method) threw: \(error)"
+                    )
+                    await respond(.failure(err))
+                }
+            case .error(let error):
+                FileHandle.standardError.write("JSONRPC error: \(error)\n".data(using: .utf8)!)
+            }
         }
-        guard let handler = handlers[method] else {
-            FileHandle.standardError.write("No handler for method: \(method)\n".data(using: .utf8)!)
-            return
+    }
+
+    // Builds a DataChannel that talks to the child process's stdio pipes.
+    private static func makeChannel(stdin: Pipe, stdout: Pipe) -> DataChannel {
+        let writeHandle = stdin.fileHandleForWriting
+        let writeQueue = DispatchQueue(label: "jsonrpc.stdin")
+
+        let write: DataChannel.WriteHandler = { data in
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                writeQueue.async {
+                    writeHandle.write(data)
+                    cont.resume()
+                }
+            }
         }
-        handler(envelope.params ?? Data("{}".utf8))
+
+        let (stream, continuation) = AsyncStream<Data>.makeStream()
+        stdout.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                continuation.finish()
+                return
+            }
+            continuation.yield(data)
+        }
+
+        return DataChannel(writeHandler: write, dataSequence: stream)
     }
 }
 
-// Decoder helper: capture `params` as raw JSON so the typed handler can decode it.
-private struct GenericEnvelope: Decodable {
-    let method: String?
-    let params: Data?
-
-    enum CodingKeys: String, CodingKey { case method, params }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        method = try c.decodeIfPresent(String.self, forKey: .method)
-        if c.contains(.params) {
-            // Re-encode the JSON value at `params` back to bytes.
-            let nested = try c.decode(JSONValue.self, forKey: .params)
-            params = try JSONEncoder().encode(nested)
-        } else {
-            params = nil
-        }
-    }
-}
-
-// A tiny dynamic-JSON representation so we can round-trip arbitrary `params`.
-private enum JSONValue: Codable {
-    case null
-    case bool(Bool)
-    case number(Double)
-    case string(String)
-    case array([JSONValue])
-    case object([String: JSONValue])
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.singleValueContainer()
-        if c.decodeNil() { self = .null; return }
-        if let b = try? c.decode(Bool.self) { self = .bool(b); return }
-        if let d = try? c.decode(Double.self) { self = .number(d); return }
-        if let s = try? c.decode(String.self) { self = .string(s); return }
-        if let a = try? c.decode([JSONValue].self) { self = .array(a); return }
-        if let o = try? c.decode([String: JSONValue].self) { self = .object(o); return }
-        throw DecodingError.dataCorruptedError(in: c, debugDescription: "Unknown JSON")
-    }
+// Carries pre-encoded JSON through `JSONRPCSession`'s `Encodable & Sendable`
+// result slot without a second round-trip through JSONEncoder.
+private struct RawEncodable: Encodable, @unchecked Sendable {
+    let data: Data
 
     func encode(to encoder: Encoder) throws {
-        var c = encoder.singleValueContainer()
-        switch self {
-        case .null: try c.encodeNil()
-        case .bool(let b): try c.encode(b)
-        case .number(let d): try c.encode(d)
-        case .string(let s): try c.encode(s)
-        case .array(let a): try c.encode(a)
-        case .object(let o): try c.encode(o)
-        }
+        // The data is a self-contained JSON document; re-decode it into a
+        // generic JSONValue and re-encode through the provided encoder so
+        // the outer envelope's encoding settings (e.g., key ordering) apply
+        // uniformly.
+        let value = try JSONDecoder().decode(JSONRPC.JSONValue.self, from: data)
+        try value.encode(to: encoder)
     }
 }
 
@@ -904,6 +901,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         bridge.on(Methods.quit) {
             NSApp.terminate(nil)
+        }
+        bridge.onOpenPanel { input in
+            await MainActor.run {
+                let panel = NSOpenPanel()
+                panel.title = input.title ?? "Open"
+                panel.allowsMultipleSelection = false
+                panel.canChooseDirectories = false
+                if let exts = input.allowedExtensions, !exts.isEmpty {
+                    panel.allowedContentTypes = exts.compactMap { ext in
+                        UTType(filenameExtension: ext)
+                    }
+                }
+                let response = panel.runModal()
+                let path = response == .OK ? panel.url?.path : nil
+                return OpenPanelOutput(path: path)
+            }
         }
 
         NotificationCenter.default.addObserver(

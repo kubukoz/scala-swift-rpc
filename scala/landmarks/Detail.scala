@@ -5,6 +5,7 @@ import cats.syntax.all.*
 import fs2.concurrent.Signal
 import fs2.concurrent.SignallingRef
 import ssr.*
+import ssr.internal.protocol.UiCommands
 
 object Detail {
 
@@ -13,6 +14,8 @@ object Detail {
     selected: SignallingRef[IO, Option[Int]],
     all: SignallingRef[IO, List[Landmark]],
     collection: SignallingRef[IO, Set[Int]],
+    openPanelResult: SignallingRef[IO, Option[String]],
+    emit: UiCommands[IO],
   ): Component = ui.vstack(
     (
       styles.padding := EdgeInsets.only(top = 40, leading = 24, bottom = 24, trailing = 24),
@@ -23,7 +26,7 @@ object Detail {
       ui.children[Option[Int]] { key =>
         key match {
           case None     => welcome(byId, all, selected)
-          case Some(id) => landmark(byId, id, all, collection)
+          case Some(id) => landmark(byId, id, all, collection, openPanelResult, emit)
         }
       } <-- (selected: Signal[IO, Option[Int]]).map(List(_)),
     )
@@ -126,6 +129,8 @@ object Detail {
     id: Int,
     all: SignallingRef[IO, List[Landmark]],
     collection: SignallingRef[IO, Set[Int]],
+    openPanelResult: SignallingRef[IO, Option[String]],
+    emit: UiCommands[IO],
   ): Component = {
     val landmark: Signal[IO, Landmark] = byId.map(_.apply(id))
     val isFav: Signal[IO, Boolean] = landmark.map(_.isFavorite)
@@ -209,6 +214,27 @@ object Detail {
                 onClick(toggleCollection),
               )
             ),
+            ui.button(
+              (
+                "📁 Open…",
+                onClick(
+                  emit
+                    .openPanel(title = Some("Choose a file"))
+                    .flatMap(out => openPanelResult.set(out.path))
+                ),
+              )
+            ),
+          )
+        ),
+        // Selected-file readout (demo for Scala→Swift request/response)
+        ui.label(
+          (
+            (openPanelResult: Signal[IO, Option[String]]).map {
+              case Some(p) => s"Selected: $p"
+              case None    => ""
+            },
+            styles.font := Font.system(12),
+            styles.foreground := Color.hex("#888888"),
           )
         ),
       )

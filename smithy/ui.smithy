@@ -4,11 +4,12 @@ namespace ssr.internal.protocol
 
 use jsonrpclib#jsonRpc
 use jsonrpclib#jsonRpcNotification
+use jsonrpclib#jsonRpcRequest
 
 @jsonRpc
 service UiCommands {
     version: "1"
-    operations: [Mount, Patch, ReplaceChildren, SetWindow, SetMenu, Quit]
+    operations: [Mount, Patch, ReplaceChildren, SetWindow, SetMenu, Quit, OpenPanel]
 }
 
 @jsonRpc
@@ -87,6 +88,17 @@ list MenuItems {
 
 @jsonRpcNotification("ui/quit")
 operation Quit {}
+
+@jsonRpcRequest("ui/openPanel")
+operation OpenPanel {
+    input := {
+        title: String
+        allowedExtensions: Strings
+    }
+    output := {
+        path: String
+    }
+}
 
 // Swift -> Scala
 

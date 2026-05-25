@@ -2,4 +2,5 @@ build/
 .scala-build/
 scala/generated/
 swift/generated/
+swift/.build/
 .bsp/

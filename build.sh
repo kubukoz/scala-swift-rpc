@@ -47,7 +47,8 @@ cs launch --contrib smithy-cli -- build --allow-unknown-traits
 cp "$BUILD_DIR/smithy/source/swift-codegen/WireTypes.swift" "$SWIFT_GENERATED_DIR/WireTypes.swift"
 
 echo "==> Building Swift app..."
-swiftc -O "$SWIFT_DIR/main.swift" "$SWIFT_GENERATED_DIR/WireTypes.swift" -o "$BUILD_DIR/ssr-app"
+swift build --package-path "$SWIFT_DIR" -c release
+cp "$SWIFT_DIR/.build/release/ssr-host" "$BUILD_DIR/ssr-app"
 
 if [[ "$MODE" == "native" ]]; then
   NATIVE_BIN="$BUILD_DIR/ssr-scala-native"

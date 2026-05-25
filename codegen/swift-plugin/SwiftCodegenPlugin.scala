@@ -1,5 +1,6 @@
 package ssr.codegen
 
+import jsonrpclib.{JsonRpcNotificationTrait, JsonRpcRequestTrait}
 import software.amazon.smithy.build.{PluginContext, SmithyBuildPlugin}
 import software.amazon.smithy.codegen.core.*
 import software.amazon.smithy.model.Model
@@ -12,10 +13,9 @@ import scala.jdk.OptionConverters.*
 
 class SwiftCodegenPlugin extends SmithyBuildPlugin:
 
-  private val Namespace                = "ssr.internal.protocol"
-  private val SwiftNamespace           = ""
-  private val JsonRpcNotificationTrait = ShapeId.from("jsonrpclib#jsonRpcNotification")
-  private val RequiredTrait            = ShapeId.from("smithy.api#required")
+  private val Namespace      = "ssr.internal.protocol"
+  private val SwiftNamespace = ""
+  private val RequiredTrait  = ShapeId.from("smithy.api#required")
 
   override def getName: String = "swift-codegen"
 
@@ -99,20 +99,34 @@ class SwiftCodegenPlugin extends SmithyBuildPlugin:
     val operations = model.getOperationShapes.asScala.toList.filter(inNamespace)
 
     def notification(op: OperationShape): Option[String] =
-      op.findTrait(JsonRpcNotificationTrait).toScala.map(_.toNode.expectStringNode.getValue)
+      op.getTrait(classOf[JsonRpcNotificationTrait]).toScala.map(_.getValue)
 
-    def inputsFor(pred: String => Boolean): Set[ShapeId] =
+    def request(op: OperationShape): Option[String] =
+      op.getTrait(classOf[JsonRpcRequestTrait]).toScala.map(_.getValue)
+
+    def methodOf(op: OperationShape): Option[String] =
+      notification(op).orElse(request(op))
+
+    // Swift-as-client (event/*): Swift sends the input and receives the output.
+    // Swift-as-server (ui/*):    Swift receives the input and sends the output.
+    def shapesFor(pred: String => Boolean, side: OperationShape => java.util.Optional[ShapeId]): Set[ShapeId] =
       operations.flatMap { op =>
-        notification(op).filter(pred).flatMap(_ => op.getInput.toScala).toList
+        methodOf(op).filter(pred).flatMap(_ => side(op).toScala).toList
       }.toSet
 
-    val eventInputs   = inputsFor(_.startsWith("event/"))
-    val commandInputs = inputsFor(!_.startsWith("event/"))
+    val encodableShapes =
+      shapesFor(_.startsWith("event/"), _.getInput) ++
+        shapesFor(!_.startsWith("event/"), _.getOutput)
+
+    val decodableShapes =
+      shapesFor(!_.startsWith("event/"), _.getInput) ++
+        shapesFor(_.startsWith("event/"), _.getOutput)
 
     val conformancesFor: ShapeId => String = id =>
-      if eventInputs.contains(id) then "Encodable, Sendable"
-      else if commandInputs.contains(id) then "Decodable, Sendable"
-      else "Codable, Sendable"
+      (encodableShapes.contains(id), decodableShapes.contains(id)) match
+        case (true, false) => "Encodable, Sendable"
+        case (false, true) => "Decodable, Sendable"
+        case _             => "Codable, Sendable"
 
     val symbols = SwiftSymbolProvider(model)
 
@@ -120,7 +134,7 @@ class SwiftCodegenPlugin extends SmithyBuildPlugin:
       .filter(inNamespace)
       .sortBy(_.getId.toString)
 
-    val methods = operations.flatMap(notification).sorted
+    val methods = operations.flatMap(methodOf).sorted
 
     val writer = SwiftWriter()
 
@@ -142,6 +156,42 @@ class SwiftCodegenPlugin extends SmithyBuildPlugin:
         writer.write("static let $L = $S", constName, method)
       }
     }
+
+    // Per-op typed request-handler registrations for ops Swift serves
+    // (ui/* request ops). Adding a new request op needs no Swift handwiring
+    // beyond the handler body.
+    val swiftServedRequests = operations.flatMap { op =>
+      for
+        method <- request(op)
+        if !method.startsWith("event/")
+        inputId  <- op.getInput.toScala
+        outputId <- op.getOutput.toScala
+      yield (op, method, inputId, outputId)
+    }
+
+    if swiftServedRequests.nonEmpty then
+      writer.write("")
+      writer.write("// MARK: - Per-op request handler registration (generated from smithy/ui.smithy)")
+      writer.write("")
+      writer.block("extension JSONRPCBridge {", "}") {
+        swiftServedRequests.foreach { case (op, method, inputId, outputId) =>
+          val opName    = op.getId.getName
+          val funcName  = "on" + opName
+          val constName = method.split("/", 2).last
+          val inputName = symbols.toSymbol(model.expectShape(inputId)).getName
+          val outName   = symbols.toSymbol(model.expectShape(outputId)).getName
+          writer.block(
+            s"func $funcName(_ handler: @escaping ($inputName) async throws -> $outName) {",
+            "}",
+          ) {
+            writer.block(s"registerRequest(Methods.$constName) { data in", "}") {
+              writer.write(s"let input = try JSONDecoder().decode($inputName.self, from: data)")
+              writer.write("let output = try await handler(input)")
+              writer.write("return try JSONEncoder().encode(output)")
+            }
+          }
+        }
+      }
 
     writer.toString
 

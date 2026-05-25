@@ -31,6 +31,7 @@ object LandmarksMain extends IOApp.Simple {
       sectionRef <- SignallingRef.of[IO, Section](Section.All).toResource
       collectionRef <- SignallingRef.of[IO, Set[Int]](Set.empty).toResource
       queryRef <- SignallingRef.of[IO, String]("").toResource
+      openPanelResult <- SignallingRef.of[IO, Option[String]](None).toResource
     } yield {
       val byIdSig: Signal[IO, Map[Int, Landmark]] =
         landmarksRef.map(_.iterator.map(l => l.id -> l).toMap)
@@ -77,7 +78,14 @@ object LandmarksMain extends IOApp.Simple {
         menu = Signal.constant(menu),
         component = ui.splitview(
           sidebar = Sidebar.render(byIdSig, visibleIdsSig, sectionRef, queryRef, selectedRef),
-          detail = Detail.render(byIdSig, selectedRef, landmarksRef, collectionRef),
+          detail = Detail.render(
+            byIdSig,
+            selectedRef,
+            landmarksRef,
+            collectionRef,
+            openPanelResult,
+            ctx.emit,
+          ),
         ),
       )
     }
