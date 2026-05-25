@@ -95,7 +95,7 @@ object App {
       _ <- Stream.resource(menuUpdates.evalMap(emit.setMenu).compile.drain.background.void)
       stdoutPipe = ch.output.through(lsp.encodeMessages).through(fs2.io.stdout[IO])
       stdinPipe = fs2.io.stdin[IO](4096).through(lsp.decodeMessages).through(ch.inputOrBounce)
-      _ <- stdoutPipe.concurrently(stdinPipe)
+      _ <- stdinPipe.mergeHaltBoth(stdoutPipe)
     } yield ()
 
     program.compile.drain

@@ -24,11 +24,11 @@ sbt runJVM         # build everything and launch with the JVM Scala child
 sbt runNative      # build everything and launch with the Scala Native child
 sbt swiftBuild     # only build the Swift host (cacheable)
 sbt swiftCodegenOutput  # only regenerate WireTypes.swift (cacheable)
-sbt scalaApp3/compile           # compile the JVM axis
-sbt scalaAppNative3/compile     # compile the Native axis
+sbt ssr3/compile        # compile the library, JVM axis (ssrNative3 for native)
+sbt demos3/compile      # compile the demos, JVM axis (demosNative3 for native)
 ```
 
-`sbt-projectmatrix` exposes `scalaApp3` (JVM) and `scalaAppNative3` (Scala Native) axes that share the same sources in `scala/`. Smithy4s codegen for Scala is driven by the `smithy4s-sbt-codegen` plugin — outputs go to each axis's `target/<axis>/src_managed/` and are never committed.
+`sbt-projectmatrix` exposes `ssr3` / `ssrNative3` (library) and `demos3` / `demosNative3` (demos) axes that share sources in `scala/lib` and `scala/demos`. Smithy4s codegen for Scala is driven by the `smithy4s-sbt-codegen` plugin — outputs go to each axis's `target/<axis>/src_managed/` and are never committed.
 
 Swift codegen + Swift build are sbt tasks (`swiftCodegenOutput`, `swiftBuild`) cached via `FileFunction.cached` with `FilesInfo.hash`. Inputs:
 - `swiftCodegenOutput` — `smithy/**/*.smithy` + the `swiftCodegen` module's runtime classpath. Drives `ssr.codegen.SwiftCodegenMain` in a forked JVM (so the plugin loads via SPI without polluting sbt's classloader).
