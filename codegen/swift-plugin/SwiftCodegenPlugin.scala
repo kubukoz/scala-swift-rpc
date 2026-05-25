@@ -1,119 +1,89 @@
 package ssr.codegen
 
 import software.amazon.smithy.build.{PluginContext, SmithyBuildPlugin}
+import software.amazon.smithy.codegen.core.*
 import software.amazon.smithy.model.Model
 import software.amazon.smithy.model.shapes.*
 
 import java.nio.file.Paths
+import java.util.function.BiFunction
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
 
 class SwiftCodegenPlugin extends SmithyBuildPlugin:
 
-  private val Namespace = "ssr.internal.protocol"
+  private val Namespace                = "ssr.internal.protocol"
+  private val SwiftNamespace           = ""
   private val JsonRpcNotificationTrait = ShapeId.from("jsonrpclib#jsonRpcNotification")
-  private val RequiredTrait = ShapeId.from("smithy.api#required")
+  private val RequiredTrait            = ShapeId.from("smithy.api#required")
 
   override def getName: String = "swift-codegen"
 
   override def execute(ctx: PluginContext): Unit =
-    val output = generate(ctx.getModel)
-    ctx.getFileManifest.writeFile(Paths.get("WireTypes.swift"), output)
+    ctx.getFileManifest.writeFile(Paths.get("WireTypes.swift"), generate(ctx.getModel))
 
-  /** Renders a Swift type reference for a shape (primitive, list, named struct, enum, union). */
-  private final class SwiftTypeRef(model: Model) extends ShapeVisitor.Default[String]:
-    protected def getDefault(shape: Shape): String = shape.getId.getName
-    override def stringShape(s: StringShape): String     = "String"
-    override def booleanShape(s: BooleanShape): String   = "Bool"
-    override def integerShape(s: IntegerShape): String   = "Int"
-    override def longShape(s: LongShape): String         = "Int"
-    override def floatShape(s: FloatShape): String       = "Double"
-    override def doubleShape(s: DoubleShape): String     = "Double"
-    override def enumShape(s: EnumShape): String         = s.getId.getName
-    override def unionShape(s: UnionShape): String       = s.getId.getName
-    override def listShape(s: ListShape): String =
-      val elem = model.expectShape(s.getMember.getTarget).accept(this)
-      s"[$elem]"
+  // ----- Symbols ------------------------------------------------------------
 
-  /** Renders a top-level Swift declaration for a shape (struct, enum, union, typealias). */
-  private final class SwiftDeclaration(
-      model: Model,
-      typeRef: SwiftTypeRef,
-      conformancesFor: ShapeId => String,
-  ) extends ShapeVisitor.Default[Option[String]]:
-    protected def getDefault(shape: Shape): Option[String] = None
+  private final class SwiftSymbolProvider(model: Model) extends SymbolProvider:
+    private def primitive(name: String): Symbol =
+      Symbol.builder().name(name).build()
 
-    override def structureShape(s: StructureShape): Option[String] =
-      val name         = s.getId.getName
-      val conformances = conformancesFor(s.getId)
-      val fields = s.getAllMembers.asScala.toList.flatMap { case (fieldName, member) =>
-        val target = model.expectShape(member.getTarget)
-        target.accept(typeRef) match
-          case "Void" => None
-          case t      =>
-            val opt = if member.hasTrait(RequiredTrait) then "" else "?"
-            Some(s"    let $fieldName: $t$opt")
-      }
-      Some((s"struct $name: $conformances {" :: fields ::: List("}")).mkString("\n"))
+    private def named(name: String): Symbol =
+      Symbol.builder().name(name).namespace(SwiftNamespace, ".").build()
 
-    override def listShape(s: ListShape): Option[String] =
-      val elem = model.expectShape(s.getMember.getTarget).accept(typeRef)
-      Some(s"typealias ${s.getId.getName} = [$elem]")
+    private val visitor = new ShapeVisitor.Default[Symbol]:
+      protected def getDefault(shape: Shape): Symbol     = named(shape.getId.getName)
+      override def stringShape(s: StringShape): Symbol   = primitive("String")
+      override def booleanShape(s: BooleanShape): Symbol = primitive("Bool")
+      override def integerShape(s: IntegerShape): Symbol = primitive("Int")
+      override def longShape(s: LongShape): Symbol       = primitive("Int")
+      override def floatShape(s: FloatShape): Symbol     = primitive("Double")
+      override def doubleShape(s: DoubleShape): Symbol   = primitive("Double")
+      // EnumShape extends StringShape, so it would otherwise be resolved as a primitive String.
+      override def enumShape(s: EnumShape): Symbol = named(s.getId.getName)
+      override def listShape(s: ListShape): Symbol =
+        val elem = toSymbol(model.expectShape(s.getMember.getTarget))
+        Symbol.builder()
+          .name(s.getId.getName)
+          .namespace(SwiftNamespace, ".")
+          .putProperty("element", elem)
+          .addReference(elem)
+          .build()
 
-    override def enumShape(s: EnumShape): Option[String] =
-      val name         = s.getId.getName
-      val conformances = conformancesFor(s.getId)
-      val cases = s.getEnumValues.asScala.toList.map { case (memberName, value) =>
-        s"""    case ${lowerCamel(memberName)} = "$value""""
-      }
-      Some((s"enum $name: String, $conformances {" :: cases ::: List("}")).mkString("\n"))
+    def toSymbol(shape: Shape): Symbol = shape.accept(visitor)
 
-    /** Union encoding mirrors smithy4s-json's single-key object form: `{"color": "..."}`. */
-    override def unionShape(s: UnionShape): Option[String] =
-      val name         = s.getId.getName
-      val conformances = conformancesFor(s.getId)
-      val members = s.getAllMembers.asScala.toList.map { case (memberName, member) =>
-        val target  = model.expectShape(member.getTarget)
-        val swiftTy = target.accept(typeRef)
-        (memberName, lowerCamel(memberName), swiftTy)
-      }
+  // ----- Writer -------------------------------------------------------------
 
-      val cases = members.map { case (_, swiftCase, swiftTy) =>
-        s"    case $swiftCase($swiftTy)"
-      }
+  private final class SwiftImports extends ImportContainer:
+    private val imports = scala.collection.mutable.TreeSet.empty[String]
+    def importSymbol(symbol: Symbol, alias: String): Unit =
+      val ns = symbol.getNamespace
+      if ns != null && ns.nonEmpty && ns != SwiftNamespace then imports += ns
 
-      val codingKeys =
-        ("    private enum CodingKeys: String, CodingKey {" ::
-          members.map { case (wireKey, swiftCase, _) =>
-            if wireKey == swiftCase then s"        case $swiftCase"
-            else s"""        case $swiftCase = "$wireKey""""
-          }) :+ "    }"
+  private final class SwiftWriter extends SymbolWriter[SwiftWriter, SwiftImports](SwiftImports()):
+    putFormatter('T', SwiftTypeFormatter)
+    trimTrailingSpaces()
 
-      val initBody = List(
-        "    init(from decoder: Decoder) throws {",
-        "        let c = try decoder.container(keyedBy: CodingKeys.self)",
-      ) ++ members.map { case (_, swiftCase, swiftTy) =>
-        s"""        if let v = try c.decodeIfPresent($swiftTy.self, forKey: .$swiftCase) { self = .$swiftCase(v); return }"""
-      } ++ List(
-        s"""        throw DecodingError.dataCorruptedError(forKey: CodingKeys.${members.head._2}, in: c, debugDescription: "no known $name variant present")""",
-        "    }",
-      )
+    /** `openBlock(String, String, Runnable)` wrapper. Scala 3 occasionally resolves the underlying
+      * Java overload to the varargs form `openBlock(String, Object*)` (treating the close-text and
+      * lambda as format args, which then fails at format time). Routing through an explicit
+      * `Runnable` avoids that.
+      */
+    def block(open: String, close: String)(body: => Unit): Unit =
+      openBlock(open, close, (() => body): Runnable)
+      ()
 
-      val encodeBody = List(
-        "    func encode(to encoder: Encoder) throws {",
-        "        var c = encoder.container(keyedBy: CodingKeys.self)",
-        "        switch self {",
-      ) ++ members.map { case (_, swiftCase, _) =>
-        s"        case .$swiftCase(let v): try c.encode(v, forKey: .$swiftCase)"
-      } ++ List(
-        "        }",
-        "    }",
-      )
+  private object SwiftTypeFormatter extends BiFunction[Object, String, String]:
+    def apply(value: Object, indent: String): String = value match
+      case s: Symbol => formatSymbol(s)
+      case other     => other.toString
 
-      Some(
-        (s"enum $name: $conformances {" :: cases ::: List("") ::: codingKeys ::: List("") ::: initBody ::: List("") ::: encodeBody ::: List("}"))
-          .mkString("\n")
-      )
+    private def formatSymbol(s: Symbol): String =
+      Option(s.getProperty("element").orElse(null).asInstanceOf[Symbol]) match
+        case Some(elem) => s"[${formatSymbol(elem)}]"
+        case None       => s.getName
+
+  // ----- Generation ---------------------------------------------------------
 
   private def lowerCamel(s: String): String =
     if s.isEmpty then s
@@ -144,25 +114,135 @@ class SwiftCodegenPlugin extends SmithyBuildPlugin:
       else if commandInputs.contains(id) then "Decodable, Sendable"
       else "Codable, Sendable"
 
-    val typeRef     = SwiftTypeRef(model)
-    val declVisitor = SwiftDeclaration(model, typeRef, conformancesFor)
+    val symbols = SwiftSymbolProvider(model)
 
     val namespaceShapes = model.shapes.iterator.asScala.toList
       .filter(inNamespace)
       .sortBy(_.getId.toString)
 
-    val declarations = namespaceShapes.flatMap(_.accept(declVisitor))
+    val methods = operations.flatMap(notification).sorted
 
-    val notifications = operations.flatMap(notification).sorted
-    val methodConsts = notifications.map { method =>
-      val constName = method.split("/", 2).last
-      s"""    static let $constName = "$method""""
+    val writer = SwiftWriter()
+
+    writer.write("// Generated by codegen/swift-plugin — do not edit.")
+    writer.write("// Source of truth: smithy/ui.smithy")
+    writer.write("")
+    writer.write("import Foundation")
+
+    writer.write("")
+    writer.write("// MARK: - Wire types (generated from smithy/ui.smithy)")
+    namespaceShapes.foreach(writeShape(writer, model, symbols, _, conformancesFor))
+
+    writer.write("")
+    writer.write("// MARK: - Method name constants (generated from smithy/ui.smithy)")
+    writer.write("")
+    writer.block("enum Methods {", "}") {
+      methods.foreach { method =>
+        val constName = method.split("/", 2).last
+        writer.write("static let $L = $S", constName, method)
+      }
     }
 
-    val sections = scala.collection.mutable.ArrayBuffer.empty[String]
-    sections += "// Generated by codegen/swift-plugin — do not edit.\n// Source of truth: smithy/ui.smithy\n\nimport Foundation"
+    writer.toString
 
-    sections += ("// MARK: - Wire types (generated from smithy/ui.smithy)\n\n" + declarations.mkString("\n\n"))
-    sections += ("// MARK: - Method name constants (generated from smithy/ui.smithy)\n\nenum Methods {\n" + methodConsts.mkString("\n") + "\n}")
+  /** Writes a top-level decl for the shape, preceded by a blank line. No-op for unsupported shapes. */
+  private def writeShape(
+      writer: SwiftWriter,
+      model: Model,
+      symbols: SwiftSymbolProvider,
+      shape: Shape,
+      conformancesFor: ShapeId => String,
+  ): Unit = shape match
+    case s: StructureShape =>
+      writer.write("")
+      writeStruct(writer, model, symbols, s, conformancesFor(s.getId))
+    case s: ListShape =>
+      writer.write("")
+      val sym = symbols.toSymbol(s)
+      writer.write("typealias $L = $T", sym.getName, sym)
+    case s: EnumShape =>
+      writer.write("")
+      writeEnum(writer, s, conformancesFor(s.getId))
+    case s: UnionShape =>
+      writer.write("")
+      writeUnion(writer, model, symbols, s, conformancesFor(s.getId))
+    case _ => ()
 
-    sections.mkString("\n\n") + "\n"
+  private def writeStruct(
+      writer: SwiftWriter,
+      model: Model,
+      symbols: SwiftSymbolProvider,
+      struct: StructureShape,
+      conformances: String,
+  ): Unit =
+    val name = struct.getId.getName
+    writer.block(s"struct $name: $conformances {", "}") {
+      struct.getAllMembers.asScala.foreach { case (fieldName, member) =>
+        val target = model.expectShape(member.getTarget)
+        val sym    = symbols.toSymbol(target)
+        if sym.getName != "Void" then
+          val opt = if member.hasTrait(RequiredTrait) then "" else "?"
+          writer.write(s"let $fieldName: $$T$opt", sym)
+      }
+    }
+
+  private def writeEnum(writer: SwiftWriter, shape: EnumShape, conformances: String): Unit =
+    val name = shape.getId.getName
+    writer.block(s"enum $name: String, $conformances {", "}") {
+      shape.getEnumValues.asScala.foreach { case (memberName, value) =>
+        writer.write("case $L = $S", lowerCamel(memberName), value)
+      }
+    }
+
+  /** Union encoding mirrors smithy4s-json's single-key object form: `{"color": "..."}`. */
+  private def writeUnion(
+      writer: SwiftWriter,
+      model: Model,
+      symbols: SwiftSymbolProvider,
+      shape: UnionShape,
+      conformances: String,
+  ): Unit =
+    val name = shape.getId.getName
+    val members = shape.getAllMembers.asScala.toList.map { case (memberName, member) =>
+      val sym = symbols.toSymbol(model.expectShape(member.getTarget))
+      (memberName, lowerCamel(memberName), sym)
+    }
+
+    writer.block(s"enum $name: $conformances {", "}") {
+      members.foreach { case (_, swiftCase, sym) =>
+        writer.write(s"case $swiftCase($$T)", sym)
+      }
+
+      writer.write("")
+      writer.block("private enum CodingKeys: String, CodingKey {", "}") {
+        members.foreach { case (wireKey, swiftCase, _) =>
+          if wireKey == swiftCase then writer.write(s"case $swiftCase")
+          else writer.write(s"""case $swiftCase = $$S""", wireKey)
+        }
+      }
+
+      writer.write("")
+      writer.block("init(from decoder: Decoder) throws {", "}") {
+        writer.write("let c = try decoder.container(keyedBy: CodingKeys.self)")
+        members.foreach { case (_, swiftCase, sym) =>
+          writer.write(
+            s"if let v = try c.decodeIfPresent($$T.self, forKey: .$swiftCase) { self = .$swiftCase(v); return }",
+            sym,
+          )
+        }
+        writer.write(
+          s"""throw DecodingError.dataCorruptedError(forKey: CodingKeys.${members.head._2}, in: c, debugDescription: $$S)""",
+          s"no known $name variant present",
+        )
+      }
+
+      writer.write("")
+      writer.block("func encode(to encoder: Encoder) throws {", "}") {
+        writer.write("var c = encoder.container(keyedBy: CodingKeys.self)")
+        writer.write("switch self {")
+        members.foreach { case (_, swiftCase, _) =>
+          writer.write(s"case .$swiftCase(let v): try c.encode(v, forKey: .$swiftCase)")
+        }
+        writer.write("}")
+      }
+    }
