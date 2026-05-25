@@ -146,14 +146,17 @@ final class JSONRPCBridge {
         }
 
         let (stream, continuation) = AsyncStream<Data>.makeStream()
+        // NOTE: on a Pipe's reader end, an empty `availableData` does NOT mean
+        // EOF — it just means the kernel had nothing buffered when the
+        // readability source fired. EOF is signalled when the writer closes
+        // its end of the pipe. So we only yield non-empty chunks here and
+        // never finish the stream from this callback; the stream lives as
+        // long as the bridge does.
         stdout.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if data.isEmpty {
-                handle.readabilityHandler = nil
-                continuation.finish()
-                return
+            if !data.isEmpty {
+                continuation.yield(data)
             }
-            continuation.yield(data)
         }
 
         return DataChannel(writeHandler: write, dataSequence: stream)
