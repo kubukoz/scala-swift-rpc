@@ -41,16 +41,20 @@ object Modifier {
   given signalStringModifier: Modifier[Signal[IO, String]] with
 
     def apply(s: Signal[IO, String], b: NodeBuilder, ctx: SSR): Resource[IO, Unit] =
-      Resource.eval(s.get.flatMap(b.setText)) *>
-        s.discrete.evalMap(b.setText).compile.drain.background.void
+      s.getAndDiscreteUpdates.flatMap { case (initial, updates) =>
+        Resource.eval(b.setText(initial)) *>
+          updates.evalMap(b.setText).compile.drain.background.void
+      }
 
   // Reactive boolean (for `attrs.checked <-- signal`) — same pattern as the
   // String version.
   given signalBooleanModifier: Modifier[Signal[IO, Boolean]] with
 
     def apply(s: Signal[IO, Boolean], b: NodeBuilder, ctx: SSR): Resource[IO, Unit] =
-      Resource.eval(s.get.flatMap(b.setChecked)) *>
-        s.discrete.evalMap(b.setChecked).compile.drain.background.void
+      s.getAndDiscreteUpdates.flatMap { case (initial, updates) =>
+        Resource.eval(b.setChecked(initial)) *>
+          updates.evalMap(b.setChecked).compile.drain.background.void
+      }
 
   given Modifier[EmptyTuple] with
     def apply(a: EmptyTuple, b: NodeBuilder, ctx: SSR): Resource[IO, Unit] = Resource.unit
@@ -78,8 +82,10 @@ object Modifier {
   given [A]: Modifier[AttrSignalPair[A]] with
 
     def apply(p: AttrSignalPair[A], b: NodeBuilder, ctx: SSR): Resource[IO, Unit] =
-      Resource.eval(p.signal.get.flatMap(p.attr.apply(_, b))) *>
-        p.signal.discrete.evalMap(p.attr.apply(_, b)).compile.drain.background.void
+      p.signal.getAndDiscreteUpdates.flatMap { case (initial, updates) =>
+        Resource.eval(p.attr.apply(initial, b)) *>
+          updates.evalMap(p.attr.apply(_, b)).compile.drain.background.void
+      }
 
   given Modifier[OnEvent] with
 
