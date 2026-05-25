@@ -34,12 +34,15 @@ def onToggle(f: Boolean => IO[Unit]): OnEvent =
 object ui {
   def vstack[M: Modifier](mods: M): Component = Component.el("vstack", mods)
   def hstack[M: Modifier](mods: M): Component = Component.el("hstack", mods)
+  def zstack[M: Modifier](mods: M): Component = Component.el("zstack", mods)
   def label[M: Modifier](mods: M): Component = Component.el("label", mods)
   def button[M: Modifier](mods: M): Component = Component.el("button", mods)
   def textfield[M: Modifier](mods: M): Component = Component.el("textfield", mods)
   def image[M: Modifier](mods: M): Component = Component.el("image", mods)
   def scrollview[M: Modifier](mods: M): Component = Component.el("scrollview", mods)
+  def hscrollview[M: Modifier](mods: M): Component = Component.el("hscrollview", mods)
   def toggle[M: Modifier](mods: M): Component = Component.el("toggle", mods)
+  def divider: Component = Component.el("divider", ())
 
   def splitview(sidebar: Component, detail: Component): Component =
     Component.el("splitview", (sidebar, detail))

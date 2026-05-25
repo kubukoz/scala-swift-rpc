@@ -1,6 +1,7 @@
 package ssr
 
 import cats.effect.*
+import ssr.internal.protocol.Alignment as WireAlignment
 import ssr.internal.protocol.Background as WireBackground
 import ssr.internal.protocol.Color as WireColor
 import ssr.internal.protocol.EdgeInsets as WireEdgeInsets
@@ -74,6 +75,13 @@ object Frame {
   def size(w: Double, h: Double): Frame = fixed(w, h)
 }
 
+type Alignment = WireAlignment
+object Alignment {
+  val Leading: Alignment = WireAlignment.LEADING
+  val Center: Alignment = WireAlignment.CENTER
+  val Trailing: Alignment = WireAlignment.TRAILING
+}
+
 // Style attributes. Each one updates a single field on the NodeBuilder's
 // Style ref and emits a setStyle patch (post-mount) carrying the whole
 // updated Style struct (matches the smithy `Patch.style` field).
@@ -86,4 +94,5 @@ object styles {
   val background: Attr[Background] = Attr((v, b) => b.setStyle(_.copy(background = Some(v))))
   val cornerRadius: Attr[Double] = Attr((v, b) => b.setStyle(_.copy(cornerRadius = Some(v))))
   val frame: Attr[Frame] = Attr((v, b) => b.setStyle(_.copy(frame = Some(v))))
+  val alignment: Attr[Alignment] = Attr((v, b) => b.setStyle(_.copy(alignment = Some(v))))
 }

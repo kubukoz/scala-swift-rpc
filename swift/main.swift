@@ -224,8 +224,9 @@ final class Renderer {
                 button.title = value ?? ""
             }
         case "setValue":
-            if let imageView = view as? NSImageView {
-                imageView.image = loadImage(named: value ?? "")
+            if let imageView = view as? AspectFillImageView {
+                imageView.assetName = value
+                imageView.layer?.contents = loadImage(named: value ?? "")
             } else if let field = view as? NSTextField, field.isEditable {
                 if field.stringValue != (value ?? "") {
                     field.stringValue = value ?? ""
@@ -331,6 +332,14 @@ final class Renderer {
         case "label":
             let label = NSTextField(labelWithString: node.text ?? "")
             label.font = NSFont.systemFont(ofSize: 14)
+            // Wrap by default so multi-line descriptions don't overflow.
+            label.lineBreakMode = .byWordWrapping
+            label.maximumNumberOfLines = 0
+            label.cell?.wraps = true
+            label.cell?.isScrollable = false
+            // Hug horizontally lower than vertically, so wide stacks let us
+            // stretch and wrap rather than expanding vertically.
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             view = label
         case "button":
             let button = ClosureButton(title: node.text ?? "")
@@ -361,9 +370,19 @@ final class Renderer {
             }
             view = field
         case "image":
-            let imageView = NSImageView()
-            imageView.imageScaling = .scaleProportionallyUpOrDown
-            imageView.image = loadImage(named: node.value ?? "")
+            // Plain view + CALayer backing — gives us SwiftUI-style
+            // `.aspectFill` (fill the bounds, crop to maintain ratio).
+            // NSImageView's built-in scaling modes either letterbox or
+            // distort, so we sidestep it entirely.
+            let imageView = AspectFillImageView()
+            imageView.wantsLayer = true
+            imageView.layer = CALayer()
+            imageView.layer?.contentsGravity = .resizeAspectFill
+            imageView.layer?.masksToBounds = true
+            imageView.assetName = node.value
+            if let img = loadImage(named: node.value ?? "") {
+                imageView.layer?.contents = img
+            }
             view = imageView
         case "scrollview":
             let scroll = NSScrollView()
@@ -430,6 +449,72 @@ final class Renderer {
             spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             spacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
             view = spacer
+        case "zstack":
+            // Layered children: every child fills the container, later
+            // children sit on top of earlier ones. The base child drives the
+            // container's intrinsic size; overlay children are clipped to it.
+            let container = NSView()
+            container.translatesAutoresizingMaskIntoConstraints = false
+            let kids = node.children ?? []
+            for (i, child) in kids.enumerated() {
+                guard let v = buildView(child) else { continue }
+                v.translatesAutoresizingMaskIntoConstraints = false
+                container.addSubview(v)
+                if i == 0 {
+                    // Base layer pins to all edges; supplies intrinsic size.
+                    NSLayoutConstraint.activate([
+                        v.topAnchor.constraint(equalTo: container.topAnchor),
+                        v.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                        v.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                        v.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                    ])
+                } else {
+                    // Overlay layers are positioned inside the container; by
+                    // default they bottom-leading-align so headline overlays
+                    // sit on the bottom-left of a hero image (matches
+                    // SwiftUI's typical use). Respect explicit padding via
+                    // the child's own style.
+                    NSLayoutConstraint.activate([
+                        v.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor),
+                        v.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+                        v.topAnchor.constraint(greaterThanOrEqualTo: container.topAnchor),
+                        v.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                        v.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                    ])
+                }
+            }
+            view = container
+        case "hscrollview":
+            let scroll = NSScrollView()
+            scroll.hasHorizontalScroller = true
+            scroll.hasVerticalScroller = false
+            scroll.drawsBackground = false
+            scroll.borderType = .noBorder
+            scroll.horizontalScrollElasticity = .allowed
+            let documentStack = NSStackView()
+            documentStack.orientation = .horizontal
+            documentStack.alignment = .top
+            documentStack.spacing = 12
+            documentStack.distribution = .fill
+            documentStack.translatesAutoresizingMaskIntoConstraints = false
+            for child in node.children ?? [] {
+                if let v = buildView(child) { documentStack.addArrangedSubview(v) }
+            }
+            scroll.documentView = documentStack
+            if let clip = scroll.contentView as? NSClipView {
+                clip.drawsBackground = false
+            }
+            NSLayoutConstraint.activate([
+                documentStack.heightAnchor.constraint(equalTo: scroll.contentView.heightAnchor),
+                documentStack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+                documentStack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+                documentStack.bottomAnchor.constraint(equalTo: scroll.contentView.bottomAnchor),
+            ])
+            view = scroll
+        case "divider":
+            let box = NSBox()
+            box.boxType = .separator
+            view = box
         default:
             view = nil
         }
@@ -503,6 +588,26 @@ final class Renderer {
                 right: padding.trailing
             )
         }
+        if let alignment = style.alignment, let stack = view as? NSStackView {
+            // SwiftUI's "alignment" on a stack is the perpendicular axis
+            // (HStack's alignment is vertical, VStack's is horizontal). NSStackView
+            // matches that semantics with its `alignment` property.
+            switch stack.orientation {
+            case .vertical:
+                switch alignment {
+                case .leading: stack.alignment = .leading
+                case .center: stack.alignment = .centerX
+                case .trailing: stack.alignment = .trailing
+                }
+            case .horizontal:
+                switch alignment {
+                case .leading: stack.alignment = .top
+                case .center: stack.alignment = .centerY
+                case .trailing: stack.alignment = .bottom
+                }
+            @unknown default: break
+            }
+        }
         if let font = style.font {
             let weight = nsWeight(font.weight)
             if let label = view as? NSTextField {
@@ -524,13 +629,24 @@ final class Renderer {
                     view.layer?.backgroundColor = color.cgColor
                 }
             case .material(let material):
-                wrapInVisualEffect(view: view, material: nsMaterial(material))
+                if material == .glass {
+                    wrapInGlassEffect(view: view)
+                } else {
+                    wrapInVisualEffect(view: view, material: nsMaterial(material))
+                }
             }
         }
         if let radius = style.cornerRadius {
             view.wantsLayer = true
             view.layer?.cornerRadius = radius
             view.layer?.masksToBounds = true
+            // If we previously wrapped this view in a visual-effect view,
+            // round its layer too so the blur respects the same corner.
+            for sub in view.subviews where sub is NSVisualEffectView {
+                sub.wantsLayer = true
+                sub.layer?.cornerRadius = radius
+                sub.layer?.masksToBounds = true
+            }
         }
         if let frame = style.frame {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -578,6 +694,29 @@ final class Renderer {
             effect.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             effect.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+    }
+
+    // Attempt to wrap a view in NSGlassEffectView on macOS 26+ (Liquid Glass).
+    // On older systems, falls back to a regular visual-effect view with the
+    // closest matching material so behavior is consistent.
+    private func wrapInGlassEffect(view: NSView) {
+        if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
+            // macOS 26+: use NSGlassEffectView for true Liquid Glass.
+            let glass = glassClass.init()
+            glass.translatesAutoresizingMaskIntoConstraints = false
+            view.wantsLayer = true
+            view.addSubview(glass, positioned: .below, relativeTo: nil)
+            NSLayoutConstraint.activate([
+                glass.topAnchor.constraint(equalTo: view.topAnchor),
+                glass.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                glass.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                glass.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            ])
+        } else {
+            // Older macOS: closest approximation is the HUD material with
+            // a subtle blur — gives a similar frosted, layered feel.
+            wrapInVisualEffect(view: view, material: .hudWindow)
+        }
     }
 
     private func nsWeight(_ w: FontWeight) -> NSFont.Weight {
@@ -634,6 +773,20 @@ final class FlippedClipView: NSClipView {
 final class ClickGestureRecognizer: NSClickGestureRecognizer {
     var onClick: (() -> Void)?
     @objc func handle() { onClick?() }
+}
+
+// Plain NSView whose backing layer draws an image with .resizeAspectFill —
+// fills the view bounds, cropping if needed. Layer.contents must be set;
+// we hold on to `assetName` only for debugging / patch lookup.
+final class AspectFillImageView: NSView {
+    var assetName: String?
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        // Layer.contents (an NSImage) handles its own scaling per
+        // contentsGravity — no extra drawing work needed.
+    }
 }
 
 // A visual-effect view that opts out of hit testing so it doesn't swallow

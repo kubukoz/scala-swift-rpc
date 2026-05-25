@@ -165,6 +165,13 @@ structure Style {
     background: Background
     cornerRadius: Double
     frame: SizeFrame
+    alignment: Alignment
+}
+
+enum Alignment {
+    LEADING
+    CENTER
+    TRAILING
 }
 
 structure EdgeInsets {
