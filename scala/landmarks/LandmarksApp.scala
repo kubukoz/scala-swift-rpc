@@ -74,7 +74,9 @@ object LandmarksApp {
     selected: SignallingRef[IO, Option[Int]],
   ): Component = ui.vstack(
     (
-      styles.padding := EdgeInsets.all(12),
+      // Extra top padding so the title clears the window's titlebar
+      // traffic-light buttons (window uses .fullSizeContentView).
+      styles.padding := EdgeInsets.only(top = 40, leading = 12, bottom = 12, trailing = 12),
       styles.spacing := 8,
       styles.background := Background.material(Material.Sidebar),
       ui.label(("Landmarks", styles.font := Font.system(18, FontWeight.Semibold))),
@@ -134,12 +136,14 @@ object LandmarksApp {
     val title: Signal[IO, String] = current.map(_.map(_.name).getOrElse("Select a landmark"))
     val parkLine: Signal[IO, String] = current.map(_.fold("")(l => s"${l.park} • ${l.state}"))
     val imageName: Signal[IO, String] = current.map(_.fold("")(_.imageName))
-    val favoriteLabel: Signal[IO, String] = current
-      .map(_.map(l => if (l.isFavorite) "Remove from favorites" else "Add to favorites").getOrElse(""))
+    val favoriteLabel: Signal[IO, String] = current.map {
+      case None    => "Favorite"
+      case Some(l) => if (l.isFavorite) "Remove from favorites" else "Add to favorites"
+    }
 
     ui.vstack(
       (
-        styles.padding := EdgeInsets.all(24),
+        styles.padding := EdgeInsets.only(top = 40, leading = 24, bottom = 24, trailing = 24),
         styles.spacing := 12,
         ui.image(
           (

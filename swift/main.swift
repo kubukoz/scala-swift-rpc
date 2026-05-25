@@ -181,24 +181,33 @@ private enum JSONValue: Codable {
 // MARK: - Renderer
 
 final class Renderer {
-    private weak var container: NSStackView?
+    private weak var container: NSView?
     private let bridge: JSONRPCBridge
     private var index: [String: NSView] = [:]
 
-    init(container: NSStackView, bridge: JSONRPCBridge) {
+    init(container: NSView, bridge: JSONRPCBridge) {
         self.container = container
         self.bridge = bridge
     }
 
     func mount(_ root: Node) {
         guard let container = container else { return }
-        for v in container.arrangedSubviews {
-            container.removeArrangedSubview(v)
-            v.removeFromSuperview()
-        }
+        for v in container.subviews { v.removeFromSuperview() }
         index.removeAll()
         if let view = buildView(root) {
-            container.addArrangedSubview(view)
+            view.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(view)
+            // Pin the root of the component tree to all four edges of the
+            // container so it grows with the window. NSStackView with
+            // arranged subviews + .leading alignment would not stretch
+            // perpendicular-axis content, leaving the split view at its
+            // intrinsic width when the window grew.
+            NSLayoutConstraint.activate([
+                view.topAnchor.constraint(equalTo: container.topAnchor),
+                view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            ])
         }
     }
 
@@ -365,19 +374,24 @@ final class Renderer {
             documentStack.orientation = .vertical
             documentStack.alignment = .leading
             documentStack.spacing = 4
+            documentStack.distribution = .fill
             documentStack.translatesAutoresizingMaskIntoConstraints = false
             for child in node.children ?? [] {
                 if let v = buildView(child) { documentStack.addArrangedSubview(v) }
             }
+            // Flip the scroll view to use top-left origin so the documentView
+            // anchors to the top of the visible area instead of the bottom.
+            // Without this, when the documentView's intrinsic height is
+            // shorter than the clipView, AppKit aligns it to the bottom.
+            let flipped = FlippedClipView()
+            flipped.drawsBackground = false
+            scroll.contentView = flipped
             scroll.documentView = documentStack
-            // Pin the document stack's width to the scroll view's content
-            // width so children get full width and only vertical scroll
-            // happens.
-            scroll.contentView.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                documentStack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-                documentStack.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
-                documentStack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+                documentStack.widthAnchor.constraint(equalTo: flipped.widthAnchor),
+                documentStack.topAnchor.constraint(equalTo: flipped.topAnchor),
+                documentStack.leadingAnchor.constraint(equalTo: flipped.leadingAnchor),
+                documentStack.trailingAnchor.constraint(equalTo: flipped.trailingAnchor),
             ])
             view = scroll
         case "splitview":
@@ -429,7 +443,34 @@ final class Renderer {
         if let v = view {
             applyStyle(node.style, to: v)
         }
+        // The Scala side flips `clickable=true` on any node whose
+        // component registered an onClick handler. Only those nodes get
+        // a click recognizer — so the recognizer sits exactly on the
+        // node that wants the click, not on ancestors. Native controls
+        // (button, textfield, toggle) deliver their own click events via
+        // their action selectors, so skip the recognizer for them to
+        // avoid double-firing.
+        if let v = view, let id = node.id, node.clickable == true, !hasNativeClick(node.tag) {
+            attachClickGesture(to: v, id: id)
+        }
         return view
+    }
+
+    private func hasNativeClick(_ tag: String) -> Bool {
+        switch tag {
+        case "button", "toggle": return true
+        default: return false
+        }
+    }
+
+    private func attachClickGesture(to view: NSView, id: String) {
+        let recognizer = ClickGestureRecognizer(target: nil, action: nil)
+        recognizer.onClick = { [weak self] in
+            self?.bridge.sendNotification(method: Methods.click, params: ClickInput(id: id))
+        }
+        recognizer.target = recognizer
+        recognizer.action = #selector(ClickGestureRecognizer.handle)
+        view.addGestureRecognizer(recognizer)
     }
 
     private func loadImage(named: String) -> NSImage? {
@@ -519,14 +560,16 @@ final class Renderer {
     // container by replacing references in the parent stack later — for
     // now, if not yet attached, just leave a marker on the view.
     private func wrapInVisualEffect(view: NSView, material: NSVisualEffectView.Material) {
-        let effect = NSVisualEffectView()
+        let effect = HitThroughVisualEffectView()
         effect.material = material
         effect.blendingMode = .behindWindow
         effect.state = .followsWindowActiveState
         effect.translatesAutoresizingMaskIntoConstraints = false
         // We can't insert behind because the view isn't in a hierarchy yet
         // during build. Instead: attach the effect as a subview of the view
-        // itself (at the back), pinned to its bounds.
+        // itself (at the back), pinned to its bounds. The effect uses a
+        // custom hitTest that returns nil so clicks pass through to the
+        // sibling subviews on top of it.
         view.wantsLayer = true
         view.addSubview(effect, positioned: .below, relativeTo: nil)
         NSLayoutConstraint.activate([
@@ -579,6 +622,25 @@ final class Renderer {
 }
 
 private var splitControllerKey: UInt8 = 0
+
+// NSClipView in AppKit uses a Y-up coordinate system, which makes the
+// documentView anchor to the bottom of the visible area when shorter than
+// the clip. Flipping it inverts to Y-down so documentView sits at the
+// top — the standard pattern for "vertical list inside a scroll view".
+final class FlippedClipView: NSClipView {
+    override var isFlipped: Bool { true }
+}
+
+final class ClickGestureRecognizer: NSClickGestureRecognizer {
+    var onClick: (() -> Void)?
+    @objc func handle() { onClick?() }
+}
+
+// A visual-effect view that opts out of hit testing so it doesn't swallow
+// clicks intended for sibling subviews stacked on top of it.
+final class HitThroughVisualEffectView: NSVisualEffectView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
 
 private var textFieldDelegateKey: UInt8 = 0
 
@@ -657,21 +719,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "SSR"
         window.titlebarAppearsTransparent = true
 
-        let container = NSStackView()
-        container.orientation = .vertical
-        container.alignment = .leading
-        container.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        container.translatesAutoresizingMaskIntoConstraints = false
-
-        let content = NSView()
-        content.addSubview(container)
-        NSLayoutConstraint.activate([
-            container.topAnchor.constraint(equalTo: content.topAnchor),
-            container.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            container.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-        ])
-        window.contentView = content
+        let container = NSView()
+        window.contentView = container
 
         bridge = JSONRPCBridge(executable: executable, arguments: arguments)
         renderer = Renderer(container: container, bridge: bridge)

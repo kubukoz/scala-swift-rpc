@@ -143,6 +143,7 @@ structure Node {
     text: String
     value: String
     style: Style
+    clickable: Boolean
     children: Nodes
 }
 

@@ -83,9 +83,14 @@ object Modifier {
 
   given Modifier[OnEvent] with
 
-    def apply(e: OnEvent, b: NodeBuilder, ctx: SSR): Resource[IO, Unit] = ctx
-      .bus
-      .register(b.id, ev => IO.whenA(ev.event == e.event)(e.handler(ev)))
+    def apply(e: OnEvent, b: NodeBuilder, ctx: SSR): Resource[IO, Unit] =
+      // Mark the node clickable so the Swift host attaches a click
+      // recognizer. Other events (input/toggle) get their event delivery
+      // for free from native controls, so no flag needed for them.
+      Resource.eval(IO.whenA(e.event == "click")(b.markClickable)) *>
+        ctx
+          .bus
+          .register(b.id, ev => IO.whenA(ev.event == e.event)(e.handler(ev)))
 
   given [K]: Modifier[KeyedChildrenBinding[K]] with
 
@@ -97,12 +102,6 @@ object Modifier {
             .flatMap { case (nb, releaseOne) =>
               rows.update(_.updated(k, (nb, releaseOne))).as(nb)
             }
-
-          val initial: Resource[IO, Unit] = Resource.eval(
-            binding.src.get.flatMap { keys =>
-              keys.traverse(allocate).flatMap(nbs => nbs.traverse_(parent.append))
-            }
-          )
 
           def reconcile(newKeys: List[K]): IO[Unit] = rows.get.flatMap { current =>
             val newKeySet = newKeys.toSet
@@ -122,7 +121,17 @@ object Modifier {
             } yield ()
           }
 
-          initial *> binding.src.discrete.evalMap(reconcile).compile.drain.background.void
+          binding
+            .src
+            .getAndDiscreteUpdates
+            .flatMap { case (initialKeys, updates) =>
+              // Initial: build each row and append to parent (matches the
+              // existing-children pattern; no wire op, the parent snapshot
+              // will pick them up at mount time).
+              Resource
+                .eval(initialKeys.traverse(allocate).flatMap(_.traverse_(parent.append)))
+                .flatMap(_ => updates.evalMap(reconcile).compile.drain.background.void)
+            }
         }
       }
 
