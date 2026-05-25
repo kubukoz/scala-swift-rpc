@@ -60,6 +60,7 @@ object App {
   def bootstrap(factory: SSR => Resource[IO, App]): IO[Unit] = {
     val program = for {
       bus <- Stream.eval(EventBus.make)
+      idGen <- Stream.eval(IdGen.make)
       initial <- Stream.eval(loadFrame)
       windowFrame <- Stream.eval(
         SignallingRef.of[IO, WindowFrame](initial.getOrElse(WindowFrame(0, 0, 0, 0)))
@@ -74,7 +75,7 @@ object App {
       ch <- FS2Channel[IO]()
       _ <- Stream.resource(ch.withEndpoints(endpoints))
       emit <- Stream.eval(Emit.fromChannel(ch))
-      ctx = SSR(bus, emit, windowFrame)
+      ctx = SSR(bus, emit, windowFrame, idGen)
       _ <- Stream.resource(
         bus.register(QuitMenuId, ev => IO.whenA(ev.event == "click")(emit.quit().void))
       )

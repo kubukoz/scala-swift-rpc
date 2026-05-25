@@ -88,9 +88,9 @@ final class NodeBuilder(
 
 object NodeBuilder {
 
-  def make(tag: String, emit: UiCommands[IO]): IO[NodeBuilder] =
+  def make(tag: String, emit: UiCommands[IO], idGen: IdGen): IO[NodeBuilder] =
     for {
-      id <- IdGen.next
+      id <- idGen.next
       text <- Ref.of[IO, Option[String]](None)
       value <- Ref.of[IO, Option[String]](None)
       style <- Ref.of[IO, Option[Style]](None)

@@ -11,7 +11,7 @@ object Component {
   def el[M](tag: String, mods: M)(using m: Modifier[M]): Component =
     ctx =>
       for {
-        b <- Resource.eval(NodeBuilder.make(tag, ctx.emit))
+        b <- Resource.eval(NodeBuilder.make(tag, ctx.emit, ctx.idGen))
         _ <- m.apply(mods, b, ctx)
       } yield b
 

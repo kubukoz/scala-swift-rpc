@@ -10,9 +10,16 @@ import jsonrpclib.fs2.FS2Channel
 import jsonrpclib.fs2.catsMonadic
 import jsonrpclib.smithy4sinterop.ClientStub
 
+trait IdGen {
+  def next: IO[String]
+}
+
 object IdGen {
-  private val counter = new java.util.concurrent.atomic.AtomicLong(0)
-  def next: IO[String] = IO(s"n${counter.incrementAndGet()}")
+  def make: IO[IdGen] = Ref.of[IO, Long](0L).map { ref =>
+    new IdGen {
+      def next: IO[String] = ref.updateAndGet(_ + 1).map(n => s"n$n")
+    }
+  }
 }
 
 // An event flowing from the host into a node. Routed by id.
@@ -51,4 +58,5 @@ final case class SSR(
   bus: EventBus,
   emit: UiCommands[IO],
   windowFrame: Signal[IO, WindowFrame],
+  idGen: IdGen,
 )
