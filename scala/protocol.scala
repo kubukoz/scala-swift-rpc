@@ -18,6 +18,14 @@ case class WindowSpec(
   screen: Option[String] = None,
 ) derives ReadWriter
 
+case class MenuItemSpec(
+  title: String,
+  id: Option[String] = None,
+  key: Option[String] = None,
+  separator: Option[Boolean] = None,
+  children: Option[List[MenuItemSpec]] = None,
+) derives ReadWriter
+
 case class Command(
   cmd: String,
   root: Option[Node] = None,
@@ -25,6 +33,7 @@ case class Command(
   op: Option[String] = None,
   value: Option[String] = None,
   window: Option[WindowSpec] = None,
+  menus: Option[List[MenuItemSpec]] = None,
 ) derives ReadWriter
 
 object Command {
@@ -42,6 +51,7 @@ object Command {
     value = Some(v),
   )
   def window(spec: WindowSpec): Command = Command(cmd = "window", window = Some(spec))
+  def menu(items: List[MenuItemSpec]): Command = Command(cmd = "menu", menus = Some(items))
   def quit: Command = Command(cmd = "quit")
 }
 

@@ -364,6 +364,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWindow.didResizeNotification,
             object: window
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowDidMove(_:)),
+            name: NSWindow.didMoveNotification,
+            object: window
+        )
 
         do {
             try bridge.start()
@@ -373,7 +379,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -386,30 +391,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyWindow(_ spec: WindowSpec) {
+        let wasVisible = window.isVisible
         let size = NSSize(width: spec.width, height: spec.height)
         let screen = resolveScreen(spec.screen) ?? window.screen ?? NSScreen.main
         let visible = screen?.visibleFrame ?? window.frame
         let originX = spec.x ?? (visible.midX - size.width / 2)
         let originY = spec.y ?? (visible.midY - size.height / 2)
         let frame = NSRect(x: originX, y: originY, width: size.width, height: size.height)
-        window.setFrame(frame, display: true)
-        sendWindowResize(window.frame.size)
+        window.setFrame(frame, display: false)
+
+        if !wasVisible {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            window.displayIfNeeded()
+        }
+        sendWindowFrame()
     }
 
     @objc private func windowDidResize(_ notification: Notification) {
-        sendWindowResize(window.frame.size)
+        sendWindowFrame()
     }
 
-    private func sendWindowResize(_ size: NSSize) {
-        let value = "\(size.width)x\(size.height)"
-        bridge.send(event: Event(event: "resize", id: "__window__", value: value))
+    @objc private func windowDidMove(_ notification: Notification) {
+        sendWindowFrame()
+    }
+
+    private func sendWindowFrame() {
+        let f = window.frame
+        let value = "\(f.origin.x)x\(f.origin.y)x\(f.size.width)x\(f.size.height)"
+        bridge.send(event: Event(event: "frame", id: "__window__", value: value))
     }
 
     private func resolveScreen(_ selector: String?) -> NSScreen? {
         guard let selector = selector else { return nil }
         switch selector {
-        case "main": return NSScreen.main
-        case "primary": return NSScreen.screens.first
+        case "main":
+            let mouse = NSEvent.mouseLocation
+            return NSScreen.screens.first(where: { $0.frame.contains(mouse) })
+                ?? NSScreen.screens.first
+        case "primary":
+            return NSScreen.screens.first(where: { $0.frame.origin == .zero })
+                ?? NSScreen.screens.first
+        case "focused":
+            return NSScreen.main
         default:
             if let idx = Int(selector), NSScreen.screens.indices.contains(idx) {
                 return NSScreen.screens[idx]

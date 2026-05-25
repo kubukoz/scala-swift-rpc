@@ -55,15 +55,20 @@ object EventBus {
 final case class Ctx(
   bus: EventBus,
   emit: Emit,
-  windowSize: Signal[IO, (Double, Double)],
+  windowFrame: Signal[IO, WindowFrame],
 )
 
-object WindowSize {
-  val EventId: String = "__window__"
-  val EventName: String = "resize"
+final case class WindowFrame(x: Double, y: Double, width: Double, height: Double)
 
-  def parse(s: String): Option[(Double, Double)] = s.split('x') match {
-    case Array(w, h) => (w.toDoubleOption, h.toDoubleOption).tupled
-    case _           => None
+object WindowFrame {
+  val EventId: String = "__window__"
+  val EventName: String = "frame"
+
+  def parse(s: String): Option[WindowFrame] = s.split('x') match {
+    case Array(x, y, w, h) =>
+      (x.toDoubleOption, y.toDoubleOption, w.toDoubleOption, h.toDoubleOption).tupled.map {
+        case (xv, yv, wv, hv) => WindowFrame(xv, yv, wv, hv)
+      }
+    case _ => None
   }
 }
