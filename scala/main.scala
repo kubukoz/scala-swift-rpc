@@ -122,6 +122,8 @@ object Main extends IOApp.Simple {
       def click(id: String): IO[Unit] = bus.fire(UiEvent(id = id, event = "click"))
       def input(id: String, value: String): IO[Unit] = bus
         .fire(UiEvent(id = id, event = "input", value = Some(value)))
+      def toggle(id: String, value: Boolean): IO[Unit] = bus
+        .fire(UiEvent(id = id, event = "toggle", value = Some(value.toString)))
       def frame(x: Double, y: Double, width: Double, height: Double): IO[Unit] = {
         val f = WindowFrame(x, y, width, height)
         windowFrame.set(f) *> onFrame(f)
