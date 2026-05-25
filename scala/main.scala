@@ -82,17 +82,17 @@ object Main extends IOApp.Simple {
             ),
           )
         ),
-        component = html.vstack(
+        component = ssr.vstack(
           (
-            html.label("Type below — the label mirrors the field:"),
-            html.hstack(
+            ssr.label("Type below — the label mirrors the field:"),
+            ssr.hstack(
               (
-                html.textfield((onInput(state.set), attrs.value <-- state)),
-                html.label(state: Signal[IO, String]),
+                ssr.textfield((onInput(state.set), attrs.value <-- state)),
+                ssr.label(state: Signal[IO, String]),
               )
             ),
-            html.label(sizeLabel),
-            html.button(("Quit", onClick(ctx.emit.quit().void))),
+            ssr.label(sizeLabel),
+            ssr.button(("Quit", onClick(ctx.emit.quit().void))),
           )
         ),
       )

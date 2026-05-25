@@ -46,7 +46,7 @@ def onClick(f: => IO[Unit]): OnEvent = OnEvent("click", _ => f)
 
 // ---------- Tag helpers ----------
 
-object html {
+object ssr {
   def vstack[M: Modifier](mods: M): Component = Component.el("vstack", mods)
   def hstack[M: Modifier](mods: M): Component = Component.el("hstack", mods)
   def label[M: Modifier](mods: M): Component = Component.el("label", mods)
