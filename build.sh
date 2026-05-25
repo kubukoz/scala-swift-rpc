@@ -54,6 +54,7 @@ if [[ "$MODE" == "native" ]]; then
   echo "==> Building Scala Native binary..."
   scala-cli --power package "$SCALA_DIR" \
     --native \
+    --main-class ssr.landmarks.LandmarksMain \
     --force \
     -o "$NATIVE_BIN"
 else

@@ -560,14 +560,23 @@ final class Renderer {
 
     private func loadImage(named: String) -> NSImage? {
         guard !named.isEmpty else { return nil }
+        if let cached = Renderer.imageCache[named] { return cached }
         let env = ProcessInfo.processInfo.environment
         let assets = env["SSR_ASSETS_DIR"] ?? FileManager.default.currentDirectoryPath + "/assets"
         for ext in ["jpg", "jpeg", "png", "heic"] {
             let path = "\(assets)/\(named).\(ext)"
-            if let image = NSImage(contentsOfFile: path) { return image }
+            if let image = NSImage(contentsOfFile: path) {
+                Renderer.imageCache[named] = image
+                return image
+            }
         }
         return nil
     }
+
+    // Process-wide cache so that re-mounting rows (e.g. clearing a search
+    // filter) doesn't re-decode JPEGs on the main thread. NSImage instances
+    // are immutable for our purposes; sharing them across views is safe.
+    private static var imageCache: [String: NSImage] = [:]
 
     private func hostController(for view: NSView) -> NSViewController {
         let controller = NSViewController()
