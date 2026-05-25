@@ -346,7 +346,7 @@ final class Renderer {
             button.bezelStyle = .rounded
             if let id = node.id {
                 button.onClick = { [weak self] in
-                    self?.bridge.sendNotification(method: Methods.click, params: ClickInput(id: id))
+                    self?.bridge.sendClick(ClickInput(id: id))
                 }
             }
             view = button
@@ -360,10 +360,7 @@ final class Renderer {
             field.widthAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
             if let id = node.id {
                 let delegate = TextFieldDelegate { [weak self] newValue in
-                    self?.bridge.sendNotification(
-                        method: Methods.input,
-                        params: InputInput(id: id, value: newValue)
-                    )
+                    self?.bridge.sendInput(InputInput(id: id, value: newValue))
                 }
                 field.delegate = delegate
                 objc_setAssociatedObject(field, &textFieldDelegateKey, delegate, .OBJC_ASSOCIATION_RETAIN)
@@ -434,10 +431,7 @@ final class Renderer {
             if node.value == "true" { button.state = .on } else { button.state = .off }
             if let id = node.id {
                 button.onToggle = { [weak self] isOn in
-                    self?.bridge.sendNotification(
-                        method: Methods.toggle,
-                        params: ToggleInput(id: id, value: isOn)
-                    )
+                    self?.bridge.sendToggle(ToggleInput(id: id, value: isOn))
                 }
             }
             view = button
@@ -551,7 +545,7 @@ final class Renderer {
     private func attachClickGesture(to view: NSView, id: String) {
         let recognizer = ClickGestureRecognizer(target: nil, action: nil)
         recognizer.onClick = { [weak self] in
-            self?.bridge.sendNotification(method: Methods.click, params: ClickInput(id: id))
+            self?.bridge.sendClick(ClickInput(id: id))
         }
         recognizer.target = recognizer
         recognizer.action = #selector(ClickGestureRecognizer.handle)
@@ -887,22 +881,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bridge = JSONRPCBridge(executable: executable, arguments: arguments)
         renderer = Renderer(container: container, bridge: bridge)
 
-        bridge.on(Methods.mount) { [weak self] (params: MountInput) in
+        bridge.onMount { [weak self] params in
             self?.renderer.mount(params.root)
         }
-        bridge.on(Methods.patch) { [weak self] (params: PatchInput) in
+        bridge.onPatch { [weak self] params in
             self?.renderer.patch(id: params.id, op: params.op, value: params.value, style: params.style)
         }
-        bridge.on(Methods.replaceChildren) { [weak self] (params: ReplaceChildrenInput) in
+        bridge.onReplaceChildren { [weak self] params in
             self?.renderer.replaceChildren(parent: params.parent, mounted: params.mounted, order: params.order)
         }
-        bridge.on(Methods.window) { [weak self] (params: SetWindowInput) in
+        bridge.onSetWindow { [weak self] params in
             self?.applyWindow(params)
         }
-        bridge.on(Methods.menu) { [weak self] (params: SetMenuInput) in
+        bridge.onSetMenu { [weak self] params in
             self?.installMenu(params.menus)
         }
-        bridge.on(Methods.quit) {
+        bridge.onQuit {
             NSApp.terminate(nil)
         }
         bridge.onOpenPanel { input in
@@ -982,15 +976,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func sendWindowFrame() {
         let f = window.frame
-        bridge.sendNotification(
-            method: Methods.frame,
-            params: WindowFrame(
-                x: Double(f.origin.x),
-                y: Double(f.origin.y),
-                width: Double(f.size.width),
-                height: Double(f.size.height)
-            )
-        )
+        bridge.sendFrame(WindowFrame(
+            x: Double(f.origin.x),
+            y: Double(f.origin.y),
+            width: Double(f.size.width),
+            height: Double(f.size.height)
+        ))
     }
 
     private func installMenu(_ specs: [MenuItem]) {
@@ -1017,7 +1008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.keyEquivalentModifierMask = modifiers
         if let id = spec.id {
             item.onSelect = { [weak self] in
-                self?.bridge.sendNotification(method: Methods.click, params: ClickInput(id: id))
+                self?.bridge.sendClick(ClickInput(id: id))
             }
         }
         if let kids = spec.children, !kids.isEmpty {
