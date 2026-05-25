@@ -38,11 +38,13 @@ Dependencies: `scala-cli`, `cs` (coursier), `swiftc`. Scala 3.8.3 pinned in `sca
 Both sides must stay in sync with `smithy/ui.smithy`. Scala uses smithy4s codegen + `jsonrpclib-smithy4s`; Swift mirrors the structs by hand.
 
 **FRP component model** (Calico-inspired, `scala/`):
-- `Component = Ctx => Resource[IO, NodeBuilder]` — opaque type in `component.scala`.
+- `Component = SSR => Resource[IO, NodeBuilder]` — opaque type in `component.scala`. `SSR` (in `runtime.scala`) is the per-app context: `bus`, `emit`, and a `Signal[IO, WindowFrame]`.
 - `Modifier[A]` typeclass (`modifier.scala`) composes children, attrs, events, signals, tuples, `Option`/`List`/`Resource`. Add new node-modifier types by giving a `Modifier` instance.
 - `Attr[A]` supports static `:=` and reactive `<--` (with `Signal[IO, A]`). See `dsl.scala`.
 - Reactive bindings (signals as text or attrs) apply the **current value synchronously** during build so the initial mount snapshot is correct, then subscribe via `discrete.evalMap(...).compile.drain.background`. Preserve this pattern when adding new reactive modifiers.
 - `ui.{vstack, hstack, label, button, textfield}` are the tag constructors.
+
+**App-level signals.** `App` exposes `window: Signal[IO, SetWindowInput]` and `menu: Signal[IO, List[MenuItem]]` (see `main.scala`). `Main.run` reads each via `getAndDiscreteUpdates`, sends the initial value before `ui/mount`, then drives subsequent `ui/window` / `ui/menu` notifications from the update stream in a background fiber.
 
 **Mount/patch lifecycle** (`node.scala`, `main.scala`):
 1. Build the component tree as a `Resource[IO, NodeBuilder]`. Each `NodeBuilder` gets a fresh id from `IdGen`.

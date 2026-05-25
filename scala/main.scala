@@ -20,7 +20,11 @@ import jsonrpclib.fs2.lsp
 import jsonrpclib.smithy4sinterop.CirceJsonCodec
 import jsonrpclib.smithy4sinterop.ServerEndpoints
 
-final case class App(window: SetWindowInput, menu: List[MenuItem], component: Component)
+final case class App(
+  window: Signal[IO, SetWindowInput],
+  menu: Signal[IO, List[MenuItem]],
+  component: Component,
+)
 
 object App {
   val QuitMenuId: String = "app:quit"
@@ -55,36 +59,46 @@ object App {
 
 object Main extends IOApp.Simple {
 
-  def app(ctx: Ctx, initial: Option[WindowFrame]): Resource[IO, App] = SignallingRef
-    .of[IO, String]("")
-    .toResource
-    .map { state =>
+  def app(ctx: SSR, initial: Option[WindowFrame]): Resource[IO, App] =
+    for {
+      state <- SignallingRef.of[IO, String]("").toResource
+      compact <- SignallingRef.of[IO, Boolean](false).toResource
+    } yield {
       val sizeLabel: Signal[IO, String] = ctx
         .windowFrame
         .map(f => f"${f.width}%.0f × ${f.height}%.0f")
       val defaultW = 480.0
       val defaultH = 240.0
-      App(
-        window = SetWindowInput(
-          width = initial.map(_.width).getOrElse(defaultW),
-          height = initial.map(_.height).getOrElse(defaultH),
-          x = initial.map(_.x),
-          y = initial.map(_.y),
-          screen = if (initial.isEmpty) Some("main") else None,
-        ),
-        menu = List(
+      val initialWindow = SetWindowInput(
+        width = initial.map(_.width).getOrElse(defaultW),
+        height = initial.map(_.height).getOrElse(defaultH),
+        x = initial.map(_.x),
+        y = initial.map(_.y),
+        screen = if (initial.isEmpty) Some("main") else None,
+      )
+      val windowSignal: Signal[IO, SetWindowInput] = compact.map { isCompact =>
+        if (isCompact) initialWindow.copy(width = 320.0, height = 160.0, x = None, y = None)
+        else initialWindow
+      }
+      val menuSignal: Signal[IO, List[MenuItem]] = state.map { typed =>
+        val label = if (typed.isEmpty) "App" else typed
+        List(
           MenuItem(
-            title = "App",
+            title = label,
             children = Some(
               List(
                 MenuItem(title = "Quit", id = Some(App.QuitMenuId), key = Some("cmd+q"))
               )
             ),
           )
-        ),
+        )
+      }
+      App(
+        window = windowSignal,
+        menu = menuSignal,
         component = ui.vstack(
           (
-            ui.label("Type below — the label mirrors the field:"),
+            ui.label("Type below — the label mirrors the field (and the menu):"),
             ui.hstack(
               (
                 ui.textfield((onInput(state.set), attrs.value <-- state)),
@@ -92,6 +106,7 @@ object Main extends IOApp.Simple {
               )
             ),
             ui.label(sizeLabel),
+            ui.button(("Toggle compact", onClick(compact.update(!_)))),
             ui.button(("Quit", onClick(ctx.emit.quit().void))),
           )
         ),
@@ -130,7 +145,7 @@ object Main extends IOApp.Simple {
       ch <- FS2Channel[IO]()
       _ <- Stream.resource(ch.withEndpoints(endpoints))
       emit <- Stream.eval(Emit.fromChannel(ch))
-      ctx = Ctx(bus, emit, windowFrame)
+      ctx = SSR(bus, emit, windowFrame)
       // Wire the App > Quit menu item to the quit notification.
       _ <- Stream.resource(
         bus.register(App.QuitMenuId, ev => IO.whenA(ev.event == "click")(emit.quit().void))
@@ -138,12 +153,17 @@ object Main extends IOApp.Simple {
       a <- Stream.resource(app(ctx, initial))
       root <- Stream.resource(Component.build(a.component, ctx))
       tree <- Stream.eval(root.snapshot)
-      _ <- Stream.eval(
-        emit.setWindow(a.window.width, a.window.height, a.window.x, a.window.y, a.window.screen)
-      )
-      _ <- Stream.eval(emit.setMenu(a.menu))
+      sendWindow = (w: SetWindowInput) => emit.setWindow(w.width, w.height, w.x, w.y, w.screen).void
+      windowStream <- Stream.resource(a.window.getAndDiscreteUpdates)
+      (window0, windowUpdates) = windowStream
+      menuStream <- Stream.resource(a.menu.getAndDiscreteUpdates)
+      (menu0, menuUpdates) = menuStream
+      _ <- Stream.eval(sendWindow(window0))
+      _ <- Stream.eval(emit.setMenu(menu0))
       _ <- Stream.eval(emit.mount(tree))
       _ <- Stream.eval(root.markMounted)
+      _ <- Stream.resource(windowUpdates.evalMap(sendWindow).compile.drain.background.void)
+      _ <- Stream.resource(menuUpdates.evalMap(emit.setMenu).compile.drain.background.void)
       stdoutPipe = ch.output.through(lsp.encodeMessages).through(fs2.io.stdout[IO])
       stdinPipe = fs2.io.stdin[IO](4096).through(lsp.decodeMessages).through(ch.inputOrBounce)
       _ <- stdoutPipe.concurrently(stdinPipe)

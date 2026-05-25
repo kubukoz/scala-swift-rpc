@@ -2,11 +2,11 @@ package ssr
 
 import cats.effect.*
 
-opaque type Component = Ctx => Resource[IO, NodeBuilder]
+opaque type Component = SSR => Resource[IO, NodeBuilder]
 
 object Component {
 
-  def build(c: Component, ctx: Ctx): Resource[IO, NodeBuilder] = c(ctx)
+  def build(c: Component, ctx: SSR): Resource[IO, NodeBuilder] = c(ctx)
 
   def el[M](tag: String, mods: M)(using m: Modifier[M]): Component =
     ctx =>

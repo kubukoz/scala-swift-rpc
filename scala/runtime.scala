@@ -49,7 +49,7 @@ object EventBus {
 
 }
 
-final case class Ctx(
+final case class SSR(
   bus: EventBus,
   emit: UiCommands[IO],
   windowFrame: Signal[IO, WindowFrame],

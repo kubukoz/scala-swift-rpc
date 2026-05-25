@@ -17,13 +17,13 @@ final case class Attr[A](apply: (A, NodeBuilder) => IO[Unit]) {
 
 given [A]: Modifier[AttrPair[A]] with
 
-  def apply(p: AttrPair[A], b: NodeBuilder, ctx: Ctx): Resource[IO, Unit] = Resource.eval(
+  def apply(p: AttrPair[A], b: NodeBuilder, ctx: SSR): Resource[IO, Unit] = Resource.eval(
     p.attr.apply(p.value, b)
   )
 
 given [A]: Modifier[AttrSignalPair[A]] with
 
-  def apply(p: AttrSignalPair[A], b: NodeBuilder, ctx: Ctx): Resource[IO, Unit] =
+  def apply(p: AttrSignalPair[A], b: NodeBuilder, ctx: SSR): Resource[IO, Unit] =
     Resource.eval(p.signal.get.flatMap(p.attr.apply(_, b))) *>
       p.signal.discrete.evalMap(p.attr.apply(_, b)).compile.drain.background.void
 
@@ -37,7 +37,7 @@ final case class OnEvent(event: String, handler: UiEvent => IO[Unit])
 
 given Modifier[OnEvent] with
 
-  def apply(e: OnEvent, b: NodeBuilder, ctx: Ctx): Resource[IO, Unit] = ctx
+  def apply(e: OnEvent, b: NodeBuilder, ctx: SSR): Resource[IO, Unit] = ctx
     .bus
     .register(b.id, ev => IO.whenA(ev.event == e.event)(e.handler(ev)))
 
