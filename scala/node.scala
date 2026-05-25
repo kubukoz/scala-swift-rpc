@@ -2,6 +2,8 @@ package htmxpoc
 
 import cats.effect.*
 import cats.syntax.all.*
+import htmxpoc.ui.Node
+import htmxpoc.ui.UiCommands
 
 // NodeBuilder owns mutable state and emits targeted patches whenever it
 // mutates after the initial mount.
@@ -12,14 +14,14 @@ final class NodeBuilder(
   value: Ref[IO, Option[String]],
   children: Ref[IO, Vector[NodeBuilder]],
   mounted: Ref[IO, Boolean],
-  emit: Emit,
+  emit: UiCommands[IO],
 ) {
 
   def setText(s: String): IO[Unit] = text.set(Some(s)) *>
-    mounted.get.flatMap(IO.whenA(_)(emit(Command.setText(id, s))))
+    mounted.get.flatMap(IO.whenA(_)(emit.patch(id, "setText", Some(s))))
 
   def setValue(s: String): IO[Unit] = value.set(Some(s)) *>
-    mounted.get.flatMap(IO.whenA(_)(emit(Command.setValue(id, s))))
+    mounted.get.flatMap(IO.whenA(_)(emit.patch(id, "setValue", Some(s))))
 
   def append(child: NodeBuilder): IO[Unit] = children.update(_ :+ child)
 
@@ -29,7 +31,7 @@ final class NodeBuilder(
       v <- value.get
       cs <- children.get
       kids <- cs.toList.traverse(_.snapshot)
-    } yield Node(tag = tag, id = Some(id), text = t, value = v, children = kids)
+    } yield Node(tag = tag, id = Some(id), text = t, value = v, children = Some(kids))
 
   def markMounted: IO[Unit] = mounted.set(true) *> children.get.flatMap(_.traverse_(_.markMounted))
 
@@ -37,7 +39,7 @@ final class NodeBuilder(
 
 object NodeBuilder {
 
-  def make(tag: String, emit: Emit): IO[NodeBuilder] =
+  def make(tag: String, emit: UiCommands[IO]): IO[NodeBuilder] =
     for {
       id <- IdGen.next
       text <- Ref.of[IO, Option[String]](None)

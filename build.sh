@@ -3,6 +3,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCALA_DIR="$HERE/scala"
+SMITHY_DIR="$HERE/smithy"
+GENERATED_DIR="$SCALA_DIR/generated"
 SWIFT_DIR="$HERE/swift"
 BUILD_DIR="$HERE/build"
 
@@ -20,6 +22,16 @@ for arg in "$@"; do
 done
 
 mkdir -p "$BUILD_DIR"
+
+echo "==> Generating smithy4s sources..."
+rm -rf "$GENERATED_DIR"
+mkdir -p "$GENERATED_DIR"
+cs launch --contrib smithy4s -- generate \
+  --output "$GENERATED_DIR" \
+  --resource-output "$BUILD_DIR/smithy-resources" \
+  --dependencies tech.neander:jsonrpclib-smithy:0.1.2 \
+  --skip resource \
+  "$SMITHY_DIR"
 
 echo "==> Building Swift app..."
 swiftc -O "$SWIFT_DIR/main.swift" -o "$BUILD_DIR/htmx-poc-app"

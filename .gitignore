@@ -1,3 +1,4 @@
 build/
 scala/.scala-build/
+scala/generated/
 .bsp/

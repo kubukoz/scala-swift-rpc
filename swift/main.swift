@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-// MARK: - Protocol types
+// MARK: - Wire types (mirror the smithy model on the Scala side)
 
 struct Node: Decodable {
     let tag: String
@@ -9,19 +9,6 @@ struct Node: Decodable {
     let value: String?
     let id: String?
     let children: [Node]?
-}
-
-struct MenuItemSpec: Decodable {
-    let title: String
-    let id: String?
-    let key: String?
-    let separator: Bool?
-    let children: [MenuItemSpec]?
-}
-
-struct StatusBarSpec: Decodable {
-    let title: String
-    let items: [MenuItemSpec]
 }
 
 struct WindowSpec: Decodable {
@@ -32,43 +19,27 @@ struct WindowSpec: Decodable {
     let screen: String?
 }
 
-struct Command: Decodable {
-    let cmd: String
-    let root: Node?
-    let menus: [MenuItemSpec]?
-    let statusBar: StatusBarSpec?
-    let id: String?
-    let op: String?
-    let value: String?
-    let window: WindowSpec?
+struct MountParams: Decodable {
+    let root: Node
 }
 
-struct Event: Encodable {
-    let event: String
+struct PatchParams: Decodable {
     let id: String
+    let op: String
     let value: String?
-
-    init(event: String, id: String, value: String? = nil) {
-        self.event = event
-        self.id = id
-        self.value = value
-    }
 }
 
-// MARK: - Subprocess bridge
+// MARK: - JSON-RPC bridge over LSP framing
 
-final class ScalaBridge {
+final class JSONRPCBridge {
     private let process = Process()
     private let stdinPipe = Pipe()
     private let stdoutPipe = Pipe()
     private var buffer = Data()
+    private let stdinQueue = DispatchQueue(label: "jsonrpc.stdin")
 
-    var onMount: ((Node) -> Void)?
-    var onPatch: ((String, String, String?) -> Void)?
-    var onMenu: (([MenuItemSpec]) -> Void)?
-    var onStatusBar: ((StatusBarSpec) -> Void)?
-    var onWindow: ((WindowSpec) -> Void)?
-    var onQuit: (() -> Void)?
+    typealias NotificationHandler = (Data) -> Void
+    private var handlers: [String: NotificationHandler] = [:]
 
     init(executable: String, arguments: [String]) {
         process.executableURL = URL(fileURLWithPath: executable)
@@ -78,89 +49,213 @@ final class ScalaBridge {
         process.standardError = FileHandle.standardError
     }
 
+    func on<P: Decodable>(_ method: String, _ handler: @escaping (P) -> Void) {
+        handlers[method] = { data in
+            do {
+                let params = try JSONDecoder().decode(P.self, from: data)
+                DispatchQueue.main.async { handler(params) }
+            } catch {
+                FileHandle.standardError.write("Decode error for \(method): \(error)\n".data(using: .utf8)!)
+            }
+        }
+    }
+
+    // Methods with no params or unit params.
+    func on(_ method: String, _ handler: @escaping () -> Void) {
+        handlers[method] = { _ in
+            DispatchQueue.main.async { handler() }
+        }
+    }
+
     func start() throws {
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             guard let self = self else { return }
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            self.handleIncoming(data)
+            self.consume(data)
         }
         try process.run()
-    }
-
-    private func handleIncoming(_ data: Data) {
-        buffer.append(data)
-        while let newlineIdx = buffer.firstIndex(of: 0x0A) {
-            let lineData = buffer.subdata(in: 0..<newlineIdx)
-            buffer.removeSubrange(0...newlineIdx)
-            guard !lineData.isEmpty else { continue }
-            do {
-                let cmd = try JSONDecoder().decode(Command.self, from: lineData)
-                switch cmd.cmd {
-                case "mount":
-                    if let root = cmd.root {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.onMount?(root)
-                        }
-                    }
-                case "patch":
-                    if let id = cmd.id, let op = cmd.op {
-                        let value = cmd.value
-                        DispatchQueue.main.async { [weak self] in
-                            self?.onPatch?(id, op, value)
-                        }
-                    }
-                case "menu":
-                    if let menus = cmd.menus {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.onMenu?(menus)
-                        }
-                    }
-                case "statusbar":
-                    if let sb = cmd.statusBar {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.onStatusBar?(sb)
-                        }
-                    }
-                case "window":
-                    if let w = cmd.window {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.onWindow?(w)
-                        }
-                    }
-                case "quit":
-                    DispatchQueue.main.async { [weak self] in
-                        self?.onQuit?()
-                    }
-                default:
-                    FileHandle.standardError.write("Unknown cmd: \(cmd.cmd)\n".data(using: .utf8)!)
-                }
-            } catch {
-                FileHandle.standardError.write("Decode error: \(error)\n".data(using: .utf8)!)
-            }
-        }
-    }
-
-    func send(event: Event) {
-        guard let data = try? JSONEncoder().encode(event) else { return }
-        var payload = data
-        payload.append(0x0A)
-        stdinPipe.fileHandleForWriting.write(payload)
     }
 
     func terminate() {
         process.terminate()
     }
+
+    func sendNotification<P: Encodable>(method: String, params: P) {
+        let envelope = NotificationEnvelope(jsonrpc: "2.0", method: method, params: params)
+        guard let body = try? JSONEncoder().encode(envelope) else { return }
+        let header = "Content-Length: \(body.count)\r\n\r\n".data(using: .ascii)!
+        stdinQueue.async { [weak self] in
+            self?.stdinPipe.fileHandleForWriting.write(header)
+            self?.stdinPipe.fileHandleForWriting.write(body)
+        }
+    }
+
+    func sendNotification(method: String) {
+        struct Empty: Encodable {}
+        sendNotification(method: method, params: Empty())
+    }
+
+    // MARK: - Decoding
+
+    private struct NotificationEnvelope<P: Encodable>: Encodable {
+        let jsonrpc: String
+        let method: String
+        let params: P
+    }
+
+    private func consume(_ data: Data) {
+        buffer.append(data)
+        while let frame = takeFrame() {
+            dispatch(frame)
+        }
+    }
+
+    private func takeFrame() -> Data? {
+        guard let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        let headerData = buffer.subdata(in: 0..<headerEnd.lowerBound)
+        guard let headerString = String(data: headerData, encoding: .ascii) else {
+            buffer.removeSubrange(0..<headerEnd.upperBound)
+            return nil
+        }
+        var contentLength: Int = -1
+        for line in headerString.split(separator: "\r\n", omittingEmptySubsequences: true) {
+            let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            if parts.count == 2 && parts[0].lowercased() == "content-length" {
+                contentLength = Int(parts[1]) ?? -1
+            }
+        }
+        guard contentLength >= 0 else {
+            buffer.removeSubrange(0..<headerEnd.upperBound)
+            return nil
+        }
+        let bodyStart = headerEnd.upperBound
+        let bodyEnd = bodyStart + contentLength
+        guard buffer.count >= bodyEnd else { return nil }
+        let body = buffer.subdata(in: bodyStart..<bodyEnd)
+        buffer.removeSubrange(0..<bodyEnd)
+        return body
+    }
+
+    private func dispatch(_ frame: Data) {
+        guard let envelope = try? JSONDecoder().decode(GenericEnvelope.self, from: frame),
+              let method = envelope.method else {
+            FileHandle.standardError.write("Frame without method: \(String(data: frame, encoding: .utf8) ?? "?")\n".data(using: .utf8)!)
+            return
+        }
+        guard let handler = handlers[method] else {
+            FileHandle.standardError.write("No handler for method: \(method)\n".data(using: .utf8)!)
+            return
+        }
+        handler(envelope.params ?? Data("{}".utf8))
+    }
+}
+
+// Decoder helper: capture `params` as raw JSON so the typed handler can decode it.
+private struct GenericEnvelope: Decodable {
+    let method: String?
+    let params: Data?
+
+    enum CodingKeys: String, CodingKey { case method, params }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        method = try c.decodeIfPresent(String.self, forKey: .method)
+        if c.contains(.params) {
+            // Re-encode the JSON value at `params` back to bytes.
+            let nested = try c.decode(JSONValue.self, forKey: .params)
+            params = try JSONEncoder().encode(nested)
+        } else {
+            params = nil
+        }
+    }
+}
+
+// A tiny dynamic-JSON representation so we can round-trip arbitrary `params`.
+private enum JSONValue: Codable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null; return }
+        if let b = try? c.decode(Bool.self) { self = .bool(b); return }
+        if let d = try? c.decode(Double.self) { self = .number(d); return }
+        if let s = try? c.decode(String.self) { self = .string(s); return }
+        if let a = try? c.decode([JSONValue].self) { self = .array(a); return }
+        if let o = try? c.decode([String: JSONValue].self) { self = .object(o); return }
+        throw DecodingError.dataCorruptedError(in: c, debugDescription: "Unknown JSON")
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .bool(let b): try c.encode(b)
+        case .number(let d): try c.encode(d)
+        case .string(let s): try c.encode(s)
+        case .array(let a): try c.encode(a)
+        case .object(let o): try c.encode(o)
+        }
+    }
+}
+
+// MARK: - Method names (mirror the smithy operations)
+
+enum Methods {
+    static let mount = "ui/mount"
+    static let patch = "ui/patch"
+    static let window = "ui/window"
+    static let menu = "ui/menu"
+    static let quit = "ui/quit"
+
+    static let click = "event/click"
+    static let input = "event/input"
+    static let frame = "event/frame"
+}
+
+// MARK: - Event payloads
+
+struct ClickEvent: Encodable {
+    let id: String
+}
+struct InputEvent: Encodable {
+    let id: String
+    let value: String
+}
+struct FrameEvent: Encodable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+}
+
+// MARK: - Menu types (mirror MenuItem in smithy)
+
+struct MenuItem: Decodable {
+    let title: String
+    let id: String?
+    let key: String?
+    let separator: Bool?
+    let children: [MenuItem]?
+}
+
+struct SetMenuParams: Decodable {
+    let menus: [MenuItem]
 }
 
 // MARK: - Renderer
 
 final class Renderer {
     private weak var container: NSStackView?
-    private let bridge: ScalaBridge
+    private let bridge: JSONRPCBridge
     private var index: [String: NSView] = [:]
 
-    init(container: NSStackView, bridge: ScalaBridge) {
+    init(container: NSStackView, bridge: JSONRPCBridge) {
         self.container = container
         self.bridge = bridge
     }
@@ -230,7 +325,7 @@ final class Renderer {
             button.bezelStyle = .rounded
             if let id = node.id {
                 button.onClick = { [weak self] in
-                    self?.bridge.send(event: Event(event: "click", id: id))
+                    self?.bridge.sendNotification(method: Methods.click, params: ClickEvent(id: id))
                 }
             }
             view = button
@@ -244,7 +339,10 @@ final class Renderer {
             field.widthAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
             if let id = node.id {
                 let delegate = TextFieldDelegate { [weak self] newValue in
-                    self?.bridge.send(event: Event(event: "input", id: id, value: newValue))
+                    self?.bridge.sendNotification(
+                        method: Methods.input,
+                        params: InputEvent(id: id, value: newValue)
+                    )
                 }
                 field.delegate = delegate
                 objc_setAssociatedObject(field, &textFieldDelegateKey, delegate, .OBJC_ASSOCIATION_RETAIN)
@@ -293,9 +391,8 @@ final class ClosureButton: NSButton {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
-    var bridge: ScalaBridge!
+    var bridge: JSONRPCBridge!
     var renderer: Renderer!
-    var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = NSMenu()
@@ -337,24 +434,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ])
         window.contentView = content
 
-        bridge = ScalaBridge(executable: executable, arguments: arguments)
+        bridge = JSONRPCBridge(executable: executable, arguments: arguments)
         renderer = Renderer(container: container, bridge: bridge)
-        bridge.onMount = { [weak self] root in
-            self?.renderer.mount(root)
+
+        bridge.on(Methods.mount) { [weak self] (params: MountParams) in
+            self?.renderer.mount(params.root)
         }
-        bridge.onPatch = { [weak self] id, op, value in
-            self?.renderer.patch(id: id, op: op, value: value)
+        bridge.on(Methods.patch) { [weak self] (params: PatchParams) in
+            self?.renderer.patch(id: params.id, op: params.op, value: params.value)
         }
-        bridge.onMenu = { [weak self] menus in
-            self?.installMenu(menus)
+        bridge.on(Methods.window) { [weak self] (params: WindowSpec) in
+            self?.applyWindow(params)
         }
-        bridge.onStatusBar = { [weak self] spec in
-            self?.installStatusBar(spec)
+        bridge.on(Methods.menu) { [weak self] (params: SetMenuParams) in
+            self?.installMenu(params.menus)
         }
-        bridge.onWindow = { [weak self] spec in
-            self?.applyWindow(spec)
-        }
-        bridge.onQuit = {
+        bridge.on(Methods.quit) {
             NSApp.terminate(nil)
         }
 
@@ -418,43 +513,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func sendWindowFrame() {
         let f = window.frame
-        let value = "\(f.origin.x)x\(f.origin.y)x\(f.size.width)x\(f.size.height)"
-        bridge.send(event: Event(event: "frame", id: "__window__", value: value))
+        bridge.sendNotification(
+            method: Methods.frame,
+            params: FrameEvent(
+                x: Double(f.origin.x),
+                y: Double(f.origin.y),
+                width: Double(f.size.width),
+                height: Double(f.size.height)
+            )
+        )
     }
 
-    private func resolveScreen(_ selector: String?) -> NSScreen? {
-        guard let selector = selector else { return nil }
-        switch selector {
-        case "main":
-            let mouse = NSEvent.mouseLocation
-            return NSScreen.screens.first(where: { $0.frame.contains(mouse) })
-                ?? NSScreen.screens.first
-        case "primary":
-            return NSScreen.screens.first(where: { $0.frame.origin == .zero })
-                ?? NSScreen.screens.first
-        case "focused":
-            return NSScreen.main
-        default:
-            if let idx = Int(selector), NSScreen.screens.indices.contains(idx) {
-                return NSScreen.screens[idx]
-            }
-            return nil
-        }
-    }
-
-    private func installStatusBar(_ spec: StatusBarSpec) {
-        if statusItem == nil {
-            statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        }
-        statusItem?.button?.title = spec.title
-        let menu = NSMenu()
-        for item in spec.items {
-            menu.addItem(buildMenuItem(item))
-        }
-        statusItem?.menu = menu
-    }
-
-    private func installMenu(_ specs: [MenuItemSpec]) {
+    private func installMenu(_ specs: [MenuItem]) {
         let mainMenu = NSMenu()
         for spec in specs {
             let topItem = NSMenuItem()
@@ -469,7 +539,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = mainMenu
     }
 
-    private func buildMenuItem(_ spec: MenuItemSpec) -> NSMenuItem {
+    private func buildMenuItem(_ spec: MenuItem) -> NSMenuItem {
         if spec.separator == true {
             return NSMenuItem.separator()
         }
@@ -478,7 +548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.keyEquivalentModifierMask = modifiers
         if let id = spec.id {
             item.onSelect = { [weak self] in
-                self?.bridge.send(event: Event(event: "click", id: id))
+                self?.bridge.sendNotification(method: Methods.click, params: ClickEvent(id: id))
             }
         }
         if let kids = spec.children, !kids.isEmpty {
@@ -504,6 +574,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return (equiv, mods)
+    }
+
+    private func resolveScreen(_ selector: String?) -> NSScreen? {
+        guard let selector = selector else { return nil }
+        switch selector {
+        case "main":
+            let mouse = NSEvent.mouseLocation
+            return NSScreen.screens.first(where: { $0.frame.contains(mouse) })
+                ?? NSScreen.screens.first
+        case "primary":
+            return NSScreen.screens.first(where: { $0.frame.origin == .zero })
+                ?? NSScreen.screens.first
+        case "focused":
+            return NSScreen.main
+        default:
+            if let idx = Int(selector), NSScreen.screens.indices.contains(idx) {
+                return NSScreen.screens[idx]
+            }
+            return nil
+        }
     }
 }
 

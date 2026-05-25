@@ -33,7 +33,7 @@ object attrs {
 
 // ---------- Events ----------
 
-final case class OnEvent(event: String, handler: Event => IO[Unit])
+final case class OnEvent(event: String, handler: UiEvent => IO[Unit])
 
 given Modifier[OnEvent] with
 
