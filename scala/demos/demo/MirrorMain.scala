@@ -51,7 +51,7 @@ object MirrorMain extends SSRApp {
           ui.label("Type below — the label mirrors the field (and the menu):"),
           ui.hstack(
             ui.textfield(onInput(state.set), attrs.value <-- state),
-            ui.label(state: Signal[IO, String]),
+            ui.label(state),
           ),
           ui.label(sizeLabel),
           ui.button("Toggle compact", onClick(compact.update(!_))),

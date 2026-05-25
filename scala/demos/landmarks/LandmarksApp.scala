@@ -36,9 +36,9 @@ object LandmarksMain extends SSRApp {
 
       val visibleIdsSig: Signal[IO, List[Int]] = (
         landmarksRef: Signal[IO, List[Landmark]],
-        sectionRef: Signal[IO, Section],
-        collectionRef: Signal[IO, Set[Int]],
-        queryRef: Signal[IO, String],
+        sectionRef,
+        collectionRef,
+        queryRef,
       ).mapN { (all, section, coll, q) =>
         val filteredBySection = section match {
           case Section.All        => all

@@ -24,7 +24,7 @@ object Sidebar {
     ),
     // Search field
     ui.textfield(
-      attrs.value <-- (query: Signal[IO, String]),
+      attrs.value <-- query,
       onInput(query.set),
     ),
     // Section selector — three "pills" laid out horizontally
@@ -51,7 +51,7 @@ object Sidebar {
       case Section.Collection => "Collection"
     }
     val label: Signal[IO, String] =
-      (section: Signal[IO, Section]).map(cur => if (cur == target) s"• $base" else base)
+      section.map(cur => if (cur == target) s"• $base" else base)
     ui.button(
       label,
       onClick(section.set(target)),

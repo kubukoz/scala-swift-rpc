@@ -27,7 +27,7 @@ object Detail {
         case None     => welcome(byId, all, selected)
         case Some(id) => landmark(byId, id, all, collection, openPanelResult, emit)
       }
-    } <-- (selected: Signal[IO, Option[Int]]).map(List(_)),
+    } <-- selected.map(List(_)),
   )
 
   // ------------------ Welcome / Featured landing ------------------
@@ -181,7 +181,7 @@ object Detail {
       ),
       // Selected-file readout (demo for Scala→Swift request/response)
       ui.label(
-        (openPanelResult: Signal[IO, Option[String]]).map {
+        openPanelResult.map {
           case Some(p) => s"Selected: $p"
           case None    => ""
         },
