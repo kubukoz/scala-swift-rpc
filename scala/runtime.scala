@@ -36,9 +36,7 @@ object EventBus {
   def make: IO[EventBus] = Ref.of[IO, Map[String, UiEvent => IO[Unit]]](Map.empty).map { ref =>
     new EventBus {
 
-      def fire(ev: UiEvent): IO[Unit] = ref
-        .get
-        .flatMap(_.get(ev.id).traverse_(_(ev)))
+      def fire(ev: UiEvent): IO[Unit] = ref.get.flatMap(_.get(ev.id).traverse_(_(ev)))
 
       def register(id: String, handler: UiEvent => IO[Unit]): Resource[IO, Unit] = Resource.make(
         ref.update(_.updated(id, handler))

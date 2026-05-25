@@ -8,13 +8,13 @@ use jsonrpclib#jsonRpcNotification
 @jsonRpc
 service UiCommands {
     version: "1"
-    operations: [Mount, Patch, SetWindow, SetMenu, Quit]
+    operations: [Mount, Patch, ReplaceChildren, SetWindow, SetMenu, Quit]
 }
 
 @jsonRpc
 service UiEvents {
     version: "1"
-    operations: [Click, Input, Frame]
+    operations: [Click, Input, Toggle, Frame]
 }
 
 // Scala -> Swift
@@ -35,6 +35,19 @@ operation Patch {
         @required
         op: String
         value: String
+        style: Style
+    }
+}
+
+@jsonRpcNotification("ui/replaceChildren")
+operation ReplaceChildren {
+    input := {
+        @required
+        parent: String
+        @required
+        mounted: Nodes
+        @required
+        order: Strings
     }
 }
 
@@ -95,6 +108,16 @@ operation Input {
     }
 }
 
+@jsonRpcNotification("event/toggle")
+operation Toggle {
+    input := {
+        @required
+        id: String
+        @required
+        value: Boolean
+    }
+}
+
 @jsonRpcNotification("event/frame")
 operation Frame {
     input: WindowFrame
@@ -119,9 +142,76 @@ structure Node {
     id: String
     text: String
     value: String
+    style: Style
+    clickable: Boolean
     children: Nodes
 }
 
 list Nodes {
     member: Node
+}
+
+list Strings {
+    member: String
+}
+
+// Style: typed, Scala-driven styling surface (Landmarks-minimal subset).
+
+structure Style {
+    padding: EdgeInsets
+    spacing: Double
+    font: Font
+    foreground: Color
+    background: Background
+    cornerRadius: Double
+    frame: SizeFrame
+}
+
+structure EdgeInsets {
+    @required
+    top: Double
+    @required
+    leading: Double
+    @required
+    bottom: Double
+    @required
+    trailing: Double
+}
+
+structure Font {
+    @required
+    size: Double
+    @required
+    weight: FontWeight
+}
+
+enum FontWeight {
+    REGULAR
+    MEDIUM
+    SEMIBOLD
+    BOLD
+}
+
+// "#RRGGBB" or "#RRGGBBAA"
+string Color
+
+union Background {
+    color: Color
+    material: Material
+}
+
+enum Material {
+    SIDEBAR
+    GLASS
+    HUD
+    REGULAR
+}
+
+structure SizeFrame {
+    width: Double
+    height: Double
+    minWidth: Double
+    maxWidth: Double
+    minHeight: Double
+    maxHeight: Double
 }

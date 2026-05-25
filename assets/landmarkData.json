@@ -1,0 +1,82 @@
+[
+  {
+    "id": 1001,
+    "name": "Turtle Rock",
+    "park": "Joshua Tree National Park",
+    "state": "California",
+    "imageName": "turtlerock",
+    "isFavorite": true
+  },
+  {
+    "id": 1002,
+    "name": "Silver Salmon Creek",
+    "park": "Lake Clark National Park and Preserve",
+    "state": "Alaska",
+    "imageName": "silversalmoncreek",
+    "isFavorite": false
+  },
+  {
+    "id": 1003,
+    "name": "Chilkoot Trail",
+    "park": "Klondike Gold Rush National Historical Park",
+    "state": "Alaska",
+    "imageName": "chilkoottrail",
+    "isFavorite": false
+  },
+  {
+    "id": 1004,
+    "name": "St. Mary Lake",
+    "park": "Glacier National Park",
+    "state": "Montana",
+    "imageName": "stmarylake",
+    "isFavorite": true
+  },
+  {
+    "id": 1005,
+    "name": "Twin Lake",
+    "park": "Lake Clark National Park and Preserve",
+    "state": "Alaska",
+    "imageName": "twinlake",
+    "isFavorite": false
+  },
+  {
+    "id": 1006,
+    "name": "Lake McDonald",
+    "park": "Glacier National Park",
+    "state": "Montana",
+    "imageName": "lakemcdonald",
+    "isFavorite": false
+  },
+  {
+    "id": 1007,
+    "name": "Charley Rivers",
+    "park": "Yukon-Charley Rivers National Preserve",
+    "state": "Alaska",
+    "imageName": "charleyrivers",
+    "isFavorite": false
+  },
+  {
+    "id": 1008,
+    "name": "Icy Bay",
+    "park": "Wrangell-St. Elias National Park and Preserve",
+    "state": "Alaska",
+    "imageName": "icybay",
+    "isFavorite": true
+  },
+  {
+    "id": 1009,
+    "name": "Rainbow Lake",
+    "park": "Gates Of The Arctic National Park and Preserve",
+    "state": "Alaska",
+    "imageName": "rainbowlake",
+    "isFavorite": false
+  },
+  {
+    "id": 1010,
+    "name": "Hidden Lake",
+    "park": "Glacier National Park",
+    "state": "Montana",
+    "imageName": "hiddenlake",
+    "isFavorite": true
+  }
+]
