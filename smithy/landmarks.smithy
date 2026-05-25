@@ -12,9 +12,15 @@ structure Landmark {
     @required
     state: String
     @required
+    continent: String
+    @required
     imageName: String
     @required
     isFavorite: Boolean
+    @required
+    isFeatured: Boolean
+    @required
+    description: String
 }
 
 list Landmarks {
