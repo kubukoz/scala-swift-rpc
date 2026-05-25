@@ -11,6 +11,9 @@ if [[ ! -x "$APP" ]]; then
   exit 1
 fi
 
+export SSR_ASSETS_DIR="$HERE/assets"
+export SCALA_APP_MAIN="${SCALA_APP_MAIN:-ssr.landmarks.LandmarksMain}"
+
 MODE="$(cat "$BUILD_DIR/.mode" 2>/dev/null || echo jvm)"
 
 if [[ "$MODE" == "native" ]]; then

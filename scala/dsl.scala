@@ -1,7 +1,6 @@
 package ssr
 
 import cats.effect.*
-import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import fs2.concurrent.Signal
 
@@ -15,34 +14,20 @@ final case class Attr[A](apply: (A, NodeBuilder) => IO[Unit]) {
   def <--(s: Signal[IO, A]): AttrSignalPair[A] = AttrSignalPair(this, s)
 }
 
-given [A]: Modifier[AttrPair[A]] with
-
-  def apply(p: AttrPair[A], b: NodeBuilder, ctx: SSR): Resource[IO, Unit] = Resource.eval(
-    p.attr.apply(p.value, b)
-  )
-
-given [A]: Modifier[AttrSignalPair[A]] with
-
-  def apply(p: AttrSignalPair[A], b: NodeBuilder, ctx: SSR): Resource[IO, Unit] =
-    Resource.eval(p.signal.get.flatMap(p.attr.apply(_, b))) *>
-      p.signal.discrete.evalMap(p.attr.apply(_, b)).compile.drain.background.void
-
 object attrs {
   val value: Attr[String] = Attr((v, b) => b.setValue(v))
+  val name: Attr[String] = Attr((v, b) => b.setValue(v))
+  val checked: Attr[Boolean] = Attr((v, b) => b.setChecked(v))
 }
 
 // ---------- Events ----------
 
 final case class OnEvent(event: String, handler: UiEvent => IO[Unit])
 
-given Modifier[OnEvent] with
-
-  def apply(e: OnEvent, b: NodeBuilder, ctx: SSR): Resource[IO, Unit] = ctx
-    .bus
-    .register(b.id, ev => IO.whenA(ev.event == e.event)(e.handler(ev)))
-
 def onInput(f: String => IO[Unit]): OnEvent = OnEvent("input", ev => ev.value.traverse_(f))
 def onClick(f: => IO[Unit]): OnEvent = OnEvent("click", _ => f)
+def onToggle(f: Boolean => IO[Unit]): OnEvent =
+  OnEvent("toggle", ev => ev.value.traverse_(s => f(s.toBoolean)))
 
 // ---------- Tag helpers ----------
 
@@ -52,4 +37,29 @@ object ui {
   def label[M: Modifier](mods: M): Component = Component.el("label", mods)
   def button[M: Modifier](mods: M): Component = Component.el("button", mods)
   def textfield[M: Modifier](mods: M): Component = Component.el("textfield", mods)
+  def image[M: Modifier](mods: M): Component = Component.el("image", mods)
+  def scrollview[M: Modifier](mods: M): Component = Component.el("scrollview", mods)
+  def toggle[M: Modifier](mods: M): Component = Component.el("toggle", mods)
+
+  def splitview(sidebar: Component, detail: Component): Component =
+    Component.el("splitview", (sidebar, detail))
+
+  def spacer: Component = Component.el("spacer", ())
+
+  // Keyed children — Calico-shaped. `builder` is called once per genuinely
+  // new key; surviving keys keep their NodeBuilder and any per-row state.
+  def children[K](builder: K => Component): KeyedChildren[K] = KeyedChildren(builder)
 }
+
+final class KeyedChildren[K] private[ssr] (val builder: K => Component) {
+  def <--(src: Signal[IO, List[K]]): KeyedChildrenBinding[K] = KeyedChildrenBinding(builder, src)
+}
+
+object KeyedChildren {
+  def apply[K](builder: K => Component): KeyedChildren[K] = new KeyedChildren(builder)
+}
+
+final case class KeyedChildrenBinding[K](
+  builder: K => Component,
+  src: Signal[IO, List[K]],
+)
