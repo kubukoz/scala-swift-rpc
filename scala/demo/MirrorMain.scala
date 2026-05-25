@@ -50,18 +50,14 @@ object MirrorMain extends IOApp.Simple {
         window = windowSignal,
         menu = menuSignal,
         component = ui.vstack(
-          (
-            ui.label("Type below — the label mirrors the field (and the menu):"),
-            ui.hstack(
-              (
-                ui.textfield((onInput(state.set), attrs.value <-- state)),
-                ui.label(state: Signal[IO, String]),
-              )
-            ),
-            ui.label(sizeLabel),
-            ui.button(("Toggle compact", onClick(compact.update(!_)))),
-            ui.button(("Quit", onClick(ctx.emit.quit().void))),
-          )
+          ui.label("Type below — the label mirrors the field (and the menu):"),
+          ui.hstack(
+            ui.textfield(onInput(state.set), attrs.value <-- state),
+            ui.label(state: Signal[IO, String]),
+          ),
+          ui.label(sizeLabel),
+          ui.button("Toggle compact", onClick(compact.update(!_))),
+          ui.button("Quit", onClick(ctx.emit.quit().void)),
         ),
       )
     }
