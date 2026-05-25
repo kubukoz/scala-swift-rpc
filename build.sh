@@ -25,7 +25,7 @@ mkdir -p "$BUILD_DIR"
 echo "==> Generating smithy4s sources..."
 rm -rf "$GENERATED_DIR"
 mkdir -p "$GENERATED_DIR"
-cs launch --contrib smithy4s -- generate \
+cs launch com.disneystreaming.smithy4s:smithy4s-codegen-cli_2.13:0.18.53 -- generate \
   --output "$GENERATED_DIR" \
   --resource-output "$BUILD_DIR/smithy-resources" \
   --dependencies tech.neander:jsonrpclib-smithy:0.1.2 \

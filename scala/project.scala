@@ -3,6 +3,7 @@
 //> using dep tech.neander::jsonrpclib-fs2::0.1.2
 //> using dep tech.neander::jsonrpclib-smithy4s::0.1.2
 //> using dep com.disneystreaming.smithy4s::smithy4s-core::0.18.53
+//> using dep com.disneystreaming.smithy4s::smithy4s-json::0.18.53
 //> using dep io.circe::circe-parser::0.14.15
 //> using dep org.typelevel::cats-effect::3.7.0
 //> using dep co.fs2::fs2-core::3.13.0

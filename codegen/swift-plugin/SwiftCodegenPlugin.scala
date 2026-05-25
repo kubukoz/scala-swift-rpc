@@ -20,7 +20,7 @@ class SwiftCodegenPlugin extends SmithyBuildPlugin:
     val output = generate(ctx.getModel)
     ctx.getFileManifest.writeFile(Paths.get("WireTypes.swift"), output)
 
-  /** Renders a Swift type reference for a shape (primitive, list, or named struct). */
+  /** Renders a Swift type reference for a shape (primitive, list, named struct, enum, union). */
   private final class SwiftTypeRef(model: Model) extends ShapeVisitor.Default[String]:
     protected def getDefault(shape: Shape): String = shape.getId.getName
     override def stringShape(s: StringShape): String     = "String"
@@ -29,11 +29,13 @@ class SwiftCodegenPlugin extends SmithyBuildPlugin:
     override def longShape(s: LongShape): String         = "Int"
     override def floatShape(s: FloatShape): String       = "Double"
     override def doubleShape(s: DoubleShape): String     = "Double"
+    override def enumShape(s: EnumShape): String         = s.getId.getName
+    override def unionShape(s: UnionShape): String       = s.getId.getName
     override def listShape(s: ListShape): String =
       val elem = model.expectShape(s.getMember.getTarget).accept(this)
       s"[$elem]"
 
-  /** Renders a top-level Swift declaration for a shape (struct, typealias, or nothing). */
+  /** Renders a top-level Swift declaration for a shape (struct, enum, union, typealias). */
   private final class SwiftDeclaration(
       model: Model,
       typeRef: SwiftTypeRef,
@@ -57,6 +59,69 @@ class SwiftCodegenPlugin extends SmithyBuildPlugin:
     override def listShape(s: ListShape): Option[String] =
       val elem = model.expectShape(s.getMember.getTarget).accept(typeRef)
       Some(s"typealias ${s.getId.getName} = [$elem]")
+
+    override def enumShape(s: EnumShape): Option[String] =
+      val name         = s.getId.getName
+      val conformances = conformancesFor(s.getId)
+      val cases = s.getEnumValues.asScala.toList.map { case (memberName, value) =>
+        s"""    case ${lowerCamel(memberName)} = "$value""""
+      }
+      Some((s"enum $name: String, $conformances {" :: cases ::: List("}")).mkString("\n"))
+
+    /** Union encoding mirrors smithy4s-json's single-key object form: `{"color": "..."}`. */
+    override def unionShape(s: UnionShape): Option[String] =
+      val name         = s.getId.getName
+      val conformances = conformancesFor(s.getId)
+      val members = s.getAllMembers.asScala.toList.map { case (memberName, member) =>
+        val target  = model.expectShape(member.getTarget)
+        val swiftTy = target.accept(typeRef)
+        (memberName, lowerCamel(memberName), swiftTy)
+      }
+
+      val cases = members.map { case (_, swiftCase, swiftTy) =>
+        s"    case $swiftCase($swiftTy)"
+      }
+
+      val codingKeys =
+        ("    private enum CodingKeys: String, CodingKey {" ::
+          members.map { case (wireKey, swiftCase, _) =>
+            if wireKey == swiftCase then s"        case $swiftCase"
+            else s"""        case $swiftCase = "$wireKey""""
+          }) :+ "    }"
+
+      val initBody = List(
+        "    init(from decoder: Decoder) throws {",
+        "        let c = try decoder.container(keyedBy: CodingKeys.self)",
+      ) ++ members.map { case (_, swiftCase, swiftTy) =>
+        s"""        if let v = try c.decodeIfPresent($swiftTy.self, forKey: .$swiftCase) { self = .$swiftCase(v); return }"""
+      } ++ List(
+        s"""        throw DecodingError.dataCorruptedError(forKey: CodingKeys.${members.head._2}, in: c, debugDescription: "no known $name variant present")""",
+        "    }",
+      )
+
+      val encodeBody = List(
+        "    func encode(to encoder: Encoder) throws {",
+        "        var c = encoder.container(keyedBy: CodingKeys.self)",
+        "        switch self {",
+      ) ++ members.map { case (_, swiftCase, _) =>
+        s"        case .$swiftCase(let v): try c.encode(v, forKey: .$swiftCase)"
+      } ++ List(
+        "        }",
+        "    }",
+      )
+
+      Some(
+        (s"enum $name: $conformances {" :: cases ::: List("") ::: codingKeys ::: List("") ::: initBody ::: List("") ::: encodeBody ::: List("}"))
+          .mkString("\n")
+      )
+
+  private def lowerCamel(s: String): String =
+    if s.isEmpty then s
+    else
+      val parts = s.split("_").toList
+      parts match
+        case Nil       => s
+        case h :: tail => h.toLowerCase + tail.map(_.toLowerCase.capitalize).mkString
 
   private def generate(model: Model): String =
     val inNamespace: Shape => Boolean = _.getId.getNamespace == Namespace
@@ -86,8 +151,7 @@ class SwiftCodegenPlugin extends SmithyBuildPlugin:
       .filter(inNamespace)
       .sortBy(_.getId.toString)
 
-    val typealiases = namespaceShapes.collect { case s: ListShape => s }.flatMap(_.accept(declVisitor))
-    val structs     = namespaceShapes.collect { case s: StructureShape => s }.flatMap(_.accept(declVisitor))
+    val declarations = namespaceShapes.flatMap(_.accept(declVisitor))
 
     val notifications = operations.flatMap(notification).sorted
     val methodConsts = notifications.map { method =>
@@ -98,10 +162,7 @@ class SwiftCodegenPlugin extends SmithyBuildPlugin:
     val sections = scala.collection.mutable.ArrayBuffer.empty[String]
     sections += "// Generated by codegen/swift-plugin — do not edit.\n// Source of truth: smithy/ui.smithy\n\nimport Foundation"
 
-    if typealiases.nonEmpty then
-      sections += ("// MARK: - List type aliases\n\n" + typealiases.mkString("\n"))
-
-    sections += ("// MARK: - Wire types (generated from smithy/ui.smithy)\n\n" + structs.mkString("\n\n"))
+    sections += ("// MARK: - Wire types (generated from smithy/ui.smithy)\n\n" + declarations.mkString("\n\n"))
     sections += ("// MARK: - Method name constants (generated from smithy/ui.smithy)\n\nenum Methods {\n" + methodConsts.mkString("\n") + "\n}")
 
     sections.mkString("\n\n") + "\n"
