@@ -556,7 +556,11 @@ final class Renderer {
         guard !named.isEmpty else { return nil }
         if let cached = Renderer.imageCache[named] { return cached }
         let env = ProcessInfo.processInfo.environment
-        let assets = env["SSR_ASSETS_DIR"] ?? FileManager.default.currentDirectoryPath + "/assets"
+        // Resolution order: explicit env var (dev / sbt) → assets/ inside the
+        // .app bundle's Resources (packaged) → CWD-relative (bare-binary fallback).
+        let assets = env["SSR_ASSETS_DIR"]
+            ?? Bundle.main.resourcePath.map { $0 + "/assets" }
+            ?? FileManager.default.currentDirectoryPath + "/assets"
         for ext in ["jpg", "jpeg", "png", "heic"] {
             let path = "\(assets)/\(named).\(ext)"
             if let image = NSImage(contentsOfFile: path) {
@@ -855,8 +859,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let env = ProcessInfo.processInfo.environment
         let executable: String
         let arguments: [String]
+        // Resolution order: explicit env var (dev / sbt) → ssr-child inside the
+        // .app bundle's Resources (packaged) → scala-cli on the dev checkout.
+        let bundledChild = Bundle.main.resourcePath.map { $0 + "/ssr-child" }
         if let bin = env["SCALA_APP_BIN"] {
             executable = bin
+            arguments = []
+        } else if let child = bundledChild, FileManager.default.isExecutableFile(atPath: child) {
+            executable = child
             arguments = []
         } else {
             let scalaPath = env["SCALA_APP_PATH"]
