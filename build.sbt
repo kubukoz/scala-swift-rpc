@@ -29,15 +29,6 @@ ThisBuild / githubWorkflowBuildPostamble += WorkflowStep.Sbt(
   name = Some("Scripted tests"),
 )
 
-// The Scala Native axis links a real binary during `test`. clang ships on the
-// ubuntu runner and the default GC (Immix) is built into the runtime — only
-// libunwind (exception handling) needs installing.
-ThisBuild / githubWorkflowBuildPreamble += WorkflowStep.Run(
-  List("sudo apt-get update", "sudo apt-get install -y libunwind-dev"),
-  name = Some("Install Scala Native toolchain"),
-  cond = Some("matrix.os == 'ubuntu-22.04'"),
-)
-
 val smithy4sVersion = "0.18.53"
 val jsonrpclibVersion = "0.1.2"
 val smithyVersion = "1.71.0"
