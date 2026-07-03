@@ -75,4 +75,5 @@ final case class SSR(
   emit: UiCommands[IO],
   windowFrame: Signal[IO, WindowFrame],
   idGen: IdGen,
+  notifications: Notifications,
 )

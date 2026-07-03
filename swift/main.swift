@@ -3,6 +3,7 @@ import Foundation
 import JSONRPC
 import LanguageServerProtocol
 import UniformTypeIdentifiers
+import UserNotifications
 
 // MARK: - Wire types: see swift/generated/WireTypes.swift (generated from smithy/ui.smithy)
 
@@ -227,6 +228,8 @@ final class Renderer {
             if let imageView = view as? AspectFillImageView {
                 imageView.assetName = value
                 imageView.layer?.contents = loadImage(named: value ?? "")
+            } else if let bar = view as? NSProgressIndicator {
+                applyProgress(bar, value: value)
             } else if let field = view as? NSTextField, field.isEditable {
                 if field.stringValue != (value ?? "") {
                     field.stringValue = value ?? ""
@@ -509,6 +512,13 @@ final class Renderer {
             let box = NSBox()
             box.boxType = .separator
             view = box
+        case "progress":
+            let bar = NSProgressIndicator()
+            bar.style = .bar
+            bar.minValue = 0
+            bar.maxValue = 1
+            applyProgress(bar, value: node.value)
+            view = bar
         default:
             view = nil
         }
@@ -539,6 +549,21 @@ final class Renderer {
         switch tag {
         case "button", "toggle": return true
         default: return false
+        }
+    }
+
+    // A `progress` node carries its fraction in `value`: a parseable Double in
+    // [0, 1] renders a determinate bar; an empty/absent/unparseable value an
+    // indeterminate (animated) one. Mirrors ProgressWindow.setBar in the
+    // launcher this replaces.
+    private func applyProgress(_ bar: NSProgressIndicator, value: String?) {
+        if let value, let fraction = Double(value) {
+            bar.stopAnimation(nil)
+            bar.isIndeterminate = false
+            bar.doubleValue = max(0, min(1, fraction))
+        } else {
+            bar.isIndeterminate = true
+            bar.startAnimation(nil)
         }
     }
 
@@ -848,13 +873,21 @@ final class ClosureButton: NSButton {
 
 // MARK: - App
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     var window: NSWindow!
     var bridge: JSONRPCBridge!
     var renderer: Renderer!
+    private var statusItem: NSStatusItem?
+    // Retains the click handler for a menu-less status item — NSButton holds
+    // its target weakly.
+    private var statusButtonHandler: StatusButtonHandler?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = NSMenu()
+        // UNUserNotificationCenter requires a real .app bundle; touching
+        // .current() from a bare binary (dev `runJVM`) throws
+        // NSInternalInconsistencyException. Only wire it up when bundled.
+        if let center = notificationCenter { center.delegate = self }
 
         let env = ProcessInfo.processInfo.environment
         let executable: String
@@ -905,6 +938,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         bridge.onSetMenu { [weak self] params in
             self?.installMenu(params.menus)
+        }
+        bridge.onSetStatusItem { [weak self] params in
+            self?.applyStatusItem(params)
+        }
+        bridge.onSetActivationPolicy { [weak self] params in
+            self?.applyActivationPolicy(params.policy)
+        }
+        bridge.onNotify { [weak self] params in
+            self?.postNotification(title: params.title, body: params.body, categoryId: params.categoryId)
+        }
+        bridge.onSetNotificationCategories { [weak self] params in
+            self?.setNotificationCategories(params.categories)
+        }
+        bridge.onScheduleReminder { [weak self] params in
+            self?.scheduleReminder(params)
+        }
+        bridge.onRequestNotificationAuth { [weak self] _ in
+            guard let center = await self?.notificationCenter else {
+                return RequestNotificationAuthOutput(granted: false)
+            }
+            return await withCheckedContinuation { cont in
+                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    cont.resume(returning: RequestNotificationAuthOutput(granted: granted))
+                }
+            }
         }
         bridge.onQuit {
             NSApp.terminate(nil)
@@ -959,6 +1017,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyWindow(_ spec: SetWindowInput) {
+        // `visible` absent = visible (back-compat). A menu-bar app hides its
+        // window until it asks to show it.
+        if spec.visible == false {
+            window.orderOut(nil)
+            return
+        }
         let wasVisible = window.isVisible
         let size = NSSize(width: spec.width, height: spec.height)
         let screen = resolveScreen(spec.screen) ?? window.screen ?? NSScreen.main
@@ -974,6 +1038,129 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.displayIfNeeded()
         }
         sendWindowFrame()
+    }
+
+    // Create / update / remove the menu-bar status item. An empty (or absent)
+    // title removes it; a `menu` builds a dropdown, otherwise the item's button
+    // fires `event/click` with `id`.
+    private func applyStatusItem(_ spec: SetStatusItemInput) {
+        let title = spec.title ?? ""
+        if title.isEmpty && spec.menu == nil {
+            if let item = statusItem {
+                NSStatusBar.system.removeStatusItem(item)
+                statusItem = nil
+            }
+            return
+        }
+        let item = statusItem ?? NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = item
+        item.button?.title = title
+
+        if let specs = spec.menu {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            for child in specs { menu.addItem(buildMenuItem(child)) }
+            item.menu = menu
+            item.button?.action = nil
+        } else {
+            item.menu = nil
+            if let id = spec.id {
+                let handler = StatusButtonHandler { [weak self] in
+                    self?.bridge.sendClick(ClickInput(id: id))
+                }
+                item.button?.target = handler
+                item.button?.action = #selector(StatusButtonHandler.handle)
+                statusButtonHandler = handler
+            }
+        }
+    }
+
+    private func applyActivationPolicy(_ policy: ActivationPolicy) {
+        switch policy {
+        case .regular: NSApp.setActivationPolicy(.regular)
+        case .accessory: NSApp.setActivationPolicy(.accessory)
+        case .prohibited: NSApp.setActivationPolicy(.prohibited)
+        }
+    }
+
+    // MARK: notifications
+
+    // UNUserNotificationCenter.current() throws unless the process is a proper
+    // .app bundle. In dev (`runJVM` launches the bare `build/ssr-app` binary)
+    // there's no bundle, so notifications no-op rather than crash.
+    private var notificationCenter: UNUserNotificationCenter? {
+        Bundle.main.bundleIdentifier == nil ? nil : UNUserNotificationCenter.current()
+    }
+
+    private func postNotification(title: String, body: String, categoryId: String?) {
+        guard let center = notificationCenter else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        if let categoryId { content.categoryIdentifier = categoryId }
+        let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        center.add(req)
+    }
+
+    private func setNotificationCategories(_ specs: [NotificationCategory]) {
+        guard let center = notificationCenter else { return }
+        let categories = specs.map { spec in
+            let actions = spec.actions.map { a in
+                UNNotificationAction(
+                    identifier: a.id,
+                    title: a.title,
+                    options: a.foreground == true ? [.foreground] : []
+                )
+            }
+            return UNNotificationCategory(
+                identifier: spec.id,
+                actions: actions,
+                intentIdentifiers: [],
+                options: []
+            )
+        }
+        center.setNotificationCategories(Set(categories))
+    }
+
+    private func scheduleReminder(_ spec: ScheduleReminderInput) {
+        guard let center = notificationCenter else { return }
+        let content = UNMutableNotificationContent()
+        content.title = spec.title
+        content.body = spec.body
+        if let categoryId = spec.categoryId { content.categoryIdentifier = categoryId }
+
+        var when = DateComponents()
+        when.hour = spec.hour
+        when.minute = spec.minute
+        let trigger = UNCalendarNotificationTrigger(dateMatching: when, repeats: true)
+        // Replacing the same identifier is idempotent — safe to call every launch.
+        let req = UNNotificationRequest(identifier: spec.id, content: content, trigger: trigger)
+        center.add(req)
+    }
+
+    // Tap on a notification body or one of its action buttons → route back to
+    // Scala keyed by category. "default" means the body itself was tapped.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let categoryId = response.notification.request.content.categoryIdentifier
+        if !categoryId.isEmpty {
+            let actionId = response.actionIdentifier == UNNotificationDefaultActionIdentifier
+                ? "default" : response.actionIdentifier
+            bridge.sendNotificationTapped(NotificationTappedInput(categoryId: categoryId, actionId: actionId))
+        }
+        completionHandler()
+    }
+
+    // Present banners even though an accessory (menu-bar) app has no key window.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
     }
 
     @objc private func windowDidResize(_ notification: Notification) {
@@ -1026,6 +1213,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for c in kids { sub.addItem(buildMenuItem(c)) }
             item.submenu = sub
         }
+        // A HEADER item is a bold, disabled title line (the app-name header at
+        // the top of a status-item dropdown).
+        if spec.style == .header {
+            item.attributedTitle = NSAttributedString(
+                string: spec.title,
+                attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)]
+            )
+            item.isEnabled = false
+        } else {
+            item.isEnabled = spec.enabled ?? true
+        }
         return item
     }
 
@@ -1065,6 +1263,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
     }
+}
+
+// Target for a menu-less status item's button click.
+final class StatusButtonHandler: NSObject {
+    private let onClick: () -> Void
+    init(onClick: @escaping () -> Void) { self.onClick = onClick }
+    @objc func handle() { onClick() }
 }
 
 final class ClosureMenuItem: NSMenuItem {

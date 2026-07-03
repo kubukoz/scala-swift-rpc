@@ -34,6 +34,11 @@ object attrs {
   val value: Attr[String] = Attr((v, b) => b.setValue(v))
   val name: Attr[String] = Attr((v, b) => b.setValue(v))
   val checked: Attr[Boolean] = Attr((v, b) => b.setChecked(v))
+
+  // Progress fraction in [0, 1] for `ui.progress`. `None` renders an
+  // indeterminate (spinning) bar; `Some(f)` a determinate one. Carried over
+  // the wire as the node's `value` string ("" = indeterminate).
+  val fraction: Attr[Option[Double]] = Attr((v, b) => b.setValue(v.fold("")(_.toString)))
 }
 
 // ---------- Events ----------
@@ -58,6 +63,7 @@ object ui {
   def scrollview[M: Modifier](mods: M): Component = Component.el("scrollview", mods)
   def hscrollview[M: Modifier](mods: M): Component = Component.el("hscrollview", mods)
   def toggle[M: Modifier](mods: M): Component = Component.el("toggle", mods)
+  def progress[M: Modifier](mods: M): Component = Component.el("progress", mods)
   def divider: Component = Component.el("divider", ())
 
   def splitview(sidebar: Component, detail: Component): Component =

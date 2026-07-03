@@ -9,13 +9,13 @@ use jsonrpclib#jsonRpcRequest
 @jsonRpc
 service UiCommands {
     version: "1"
-    operations: [Mount, Patch, ReplaceChildren, SetWindow, SetMenu, Quit, OpenPanel]
+    operations: [Mount, Patch, ReplaceChildren, SetWindow, SetMenu, SetStatusItem, SetActivationPolicy, Notify, SetNotificationCategories, ScheduleReminder, RequestNotificationAuth, Quit, OpenPanel]
 }
 
 @jsonRpc
 service UiEvents {
     version: "1"
-    operations: [Click, Input, Toggle, Frame]
+    operations: [Click, Input, Toggle, Frame, NotificationTapped]
 }
 
 // Scala -> Swift
@@ -62,7 +62,36 @@ operation SetWindow {
         x: Double
         y: Double
         screen: String
+        // Show / hide the main window without tearing it down. Absent = visible
+        // (back-compat). A menu-bar app hides its window until asked to show it.
+        visible: Boolean
     }
+}
+
+// Declares (or updates) the menu-bar status item. Sending again replaces
+// title/glyph and the dropdown in place. Omit `menu` for a click-through item
+// that fires `event/click` with `id`. Send with an empty title to remove it.
+@jsonRpcNotification("ui/statusItem")
+operation SetStatusItem {
+    input := {
+        title: String
+        id: String
+        menu: MenuItems
+    }
+}
+
+@jsonRpcNotification("ui/activationPolicy")
+operation SetActivationPolicy {
+    input := {
+        @required
+        policy: ActivationPolicy
+    }
+}
+
+enum ActivationPolicy {
+    REGULAR
+    ACCESSORY
+    PROHIBITED
 }
 
 @jsonRpcNotification("ui/menu")
@@ -80,6 +109,16 @@ structure MenuItem {
     key: String
     separator: Boolean
     children: MenuItems
+    // Absent = enabled. A disabled item is greyed and non-clickable — used for
+    // status/header lines in a status-item dropdown.
+    enabled: Boolean
+    style: MenuItemStyle
+}
+
+enum MenuItemStyle {
+    NORMAL
+    // Bold, disabled — the app-name title line at the top of a dropdown.
+    HEADER
 }
 
 list MenuItems {
@@ -97,6 +136,83 @@ operation OpenPanel {
     }
     output := {
         path: String
+    }
+}
+
+// Notifications (UNUserNotificationCenter).
+
+// Post a banner now. `categoryId` ties it to actions declared via
+// SetNotificationCategories (its buttons + tap route back as event/notificationTapped).
+@jsonRpcNotification("ui/notify")
+operation Notify {
+    input := {
+        @required
+        title: String
+        @required
+        body: String
+        categoryId: String
+    }
+}
+
+// Declare tappable action buttons once, grouped by category.
+@jsonRpcNotification("ui/notificationCategories")
+operation SetNotificationCategories {
+    input := {
+        @required
+        categories: NotificationCategories
+    }
+}
+
+structure NotificationCategory {
+    @required
+    id: String
+    @required
+    actions: NotificationActions
+}
+
+structure NotificationAction {
+    @required
+    id: String
+    @required
+    title: String
+    // Bring the app to the foreground when tapped (.foreground option).
+    foreground: Boolean
+}
+
+list NotificationCategories {
+    member: NotificationCategory
+}
+
+list NotificationActions {
+    member: NotificationAction
+}
+
+// Register a repeating daily reminder at hour:minute (UNCalendarNotificationTrigger).
+// Idempotent per `id` — safe to call every launch.
+@jsonRpcNotification("ui/scheduleReminder")
+operation ScheduleReminder {
+    input := {
+        @required
+        id: String
+        @required
+        title: String
+        @required
+        body: String
+        categoryId: String
+        @required
+        hour: Integer
+        @required
+        minute: Integer
+    }
+}
+
+// Request notification authorization; returns whether it was granted.
+@jsonRpcRequest("ui/requestNotificationAuth")
+operation RequestNotificationAuth {
+    input := {}
+    output := {
+        @required
+        granted: Boolean
     }
 }
 
@@ -133,6 +249,18 @@ operation Toggle {
 @jsonRpcNotification("event/frame")
 operation Frame {
     input: WindowFrame
+}
+
+// A notification (or one of its action buttons) was tapped. `actionId` is the
+// action's id, or "default" for a tap on the notification body.
+@jsonRpcNotification("event/notificationTapped")
+operation NotificationTapped {
+    input := {
+        @required
+        categoryId: String
+        @required
+        actionId: String
+    }
 }
 
 // Shared

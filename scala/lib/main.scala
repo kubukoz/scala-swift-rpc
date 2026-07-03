@@ -23,7 +23,9 @@ import fs2.concurrent.Signal
 import fs2.concurrent.SignallingRef
 import fs2.io.file.Files
 import fs2.io.file.Path
+import ssr.internal.protocol.ActivationPolicy
 import ssr.internal.protocol.MenuItem
+import ssr.internal.protocol.SetStatusItemInput
 import ssr.internal.protocol.SetWindowInput
 import ssr.internal.protocol.UiEvents
 import ssr.internal.protocol.WindowFrame
@@ -39,6 +41,12 @@ final case class App(
   window: Signal[IO, SetWindowInput],
   menu: Signal[IO, List[MenuItem]],
   component: Component,
+  // A menu-bar status item, if any. Driven like `window` / `menu`: the current
+  // value is sent before mount, updates in a background fiber. `None` = no item.
+  statusItem: Signal[IO, Option[SetStatusItemInput]] = Signal.constant(None),
+  // Sent once before mount. Default `Regular` (windowed app); `Accessory` makes
+  // a menu-bar agent with no Dock icon.
+  activationPolicy: ActivationPolicy = ActivationPolicy.REGULAR,
 )
 
 object App {
@@ -91,24 +99,32 @@ object App {
       ch <- FS2Channel[IO]()
       _ <- Stream.resource(ch.withEndpoints(endpoints))
       emit <- Stream.eval(Emit.fromChannel(ch))
-      ctx = SSR(bus, emit, windowFrame, idGen)
+      ctx = SSR(bus, emit, windowFrame, idGen, Notifications(emit, bus))
       _ <- Stream.resource(
         bus.register(QuitMenuId, ev => IO.whenA(ev.event == "click")(emit.quit().void))
       )
       a <- Stream.resource(factory(ctx))
       root <- Stream.resource(Component.build(a.component, ctx))
       tree <- Stream.eval(root.snapshot)
-      sendWindow = (w: SetWindowInput) => emit.setWindow(w.width, w.height, w.x, w.y, w.screen).void
+      sendWindow = (w: SetWindowInput) =>
+        emit.setWindow(w.width, w.height, w.x, w.y, w.screen, w.visible).void
+      sendStatusItem = (s: Option[SetStatusItemInput]) =>
+        emit.setStatusItem(s.flatMap(_.title), s.flatMap(_.id), s.flatMap(_.menu)).void
       windowStream <- Stream.resource(a.window.getAndDiscreteUpdates)
       (window0, windowUpdates) = windowStream
       menuStream <- Stream.resource(a.menu.getAndDiscreteUpdates)
       (menu0, menuUpdates) = menuStream
+      statusStream <- Stream.resource(a.statusItem.getAndDiscreteUpdates)
+      (status0, statusUpdates) = statusStream
+      _ <- Stream.eval(emit.setActivationPolicy(a.activationPolicy).void)
       _ <- Stream.eval(sendWindow(window0))
       _ <- Stream.eval(emit.setMenu(menu0))
+      _ <- Stream.eval(sendStatusItem(status0))
       _ <- Stream.eval(emit.mount(tree))
       _ <- Stream.eval(root.markMounted)
       _ <- Stream.resource(windowUpdates.evalMap(sendWindow).compile.drain.background.void)
       _ <- Stream.resource(menuUpdates.evalMap(emit.setMenu).compile.drain.background.void)
+      _ <- Stream.resource(statusUpdates.evalMap(sendStatusItem).compile.drain.background.void)
       stdoutPipe = ch.output.through(lsp.encodeMessages).through(fs2.io.stdout[IO])
       stdinPipe = fs2.io.stdin[IO](4096).through(lsp.decodeMessages).through(ch.inputOrBounce)
       _ <- stdinPipe.mergeHaltBoth(stdoutPipe)
@@ -140,6 +156,8 @@ private[ssr] object Main {
         val f = WindowFrame(x, y, width, height)
         windowFrame.set(f) *> onFrame(f)
       }
+      def notificationTapped(categoryId: String, actionId: String): IO[Unit] = bus
+        .fire(UiEvent(id = categoryId, event = "notificationTapped", value = Some(actionId)))
     }
 
 }
