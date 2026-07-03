@@ -180,8 +180,11 @@ lazy val ssr = (projectMatrix in file("scala/lib"))
         (Compile / unmanagedSources / excludeFilter).value
       ),
     Compile / smithy4sInputDirs := Seq((ThisBuild / smithySourceDir).value),
+    Test / scalaSource := (ThisBuild / baseDirectory).value / "scala" / "lib-test",
     libraryDependencies ++= Seq(
       "tech.neander" % "jsonrpclib-smithy" % jsonrpclibVersion % Smithy4s,
+      "org.scalameta" %%% "munit" % "1.2.1" % Test,
+      "org.typelevel" %%% "munit-cats-effect" % "2.2.0" % Test,
     ),
   )
   .jvmPlatform(scalaVersions = Seq(scala3Version))

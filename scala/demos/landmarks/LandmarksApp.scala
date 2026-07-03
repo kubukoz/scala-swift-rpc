@@ -22,7 +22,6 @@ import fs2.concurrent.Signal
 import fs2.concurrent.SignallingRef
 import fs2.io.file.Path
 import ssr.*
-import ssr.internal.protocol.MenuItem
 import ssr.internal.protocol.SetWindowInput
 
 object LandmarksMain extends SSRApp {
@@ -36,7 +35,8 @@ object LandmarksMain extends SSRApp {
     )
   )
 
-  def render(ctx: SSR): Resource[IO, App] =
+  def render(ctx: SSR): Resource[IO, App] = {
+    given SSR = ctx
     for {
       initialFrame <- App.loadFrame.toResource
       initialLandmarks <- LandmarkLoader.loadAll(assetsDir / "landmarkData.json").toResource
@@ -46,6 +46,11 @@ object LandmarksMain extends SSRApp {
       collectionRef <- SignallingRef.of[IO, Set[Int]](Set.empty).toResource
       queryRef <- SignallingRef.of[IO, String]("").toResource
       openPanelResult <- SignallingRef.of[IO, Option[String]](None).toResource
+      menuSignal <- appMenu(
+        menu.menu("Landmarks")(
+          menu.item("Quit", key = Some("cmd+q"))(ctx.emit.quit().void)
+        )
+      )
     } yield {
       val byIdSig: Signal[IO, Map[Int, Landmark]] =
         landmarksRef.map(_.iterator.map(l => l.id -> l).toMap)
@@ -76,20 +81,9 @@ object LandmarksMain extends SSRApp {
         screen = if (initialFrame.isEmpty) Some("main") else None,
       )
 
-      val menu = List(
-        MenuItem(
-          title = "Landmarks",
-          children = Some(
-            List(
-              MenuItem(title = "Quit", id = Some(App.QuitMenuId), key = Some("cmd+q"))
-            )
-          ),
-        )
-      )
-
       App(
         window = Signal.constant(window),
-        menu = Signal.constant(menu),
+        menu = menuSignal,
         component = ui.splitview(
           sidebar = Sidebar.render(byIdSig, visibleIdsSig, sectionRef, queryRef, selectedRef),
           detail = Detail.render(
@@ -103,5 +97,6 @@ object LandmarksMain extends SSRApp {
         ),
       )
     }
+  }
 
 }
