@@ -1,8 +1,42 @@
 val scala3Version = "3.8.3"
+val scala212Version = "2.12.21"
+
+ThisBuild / tlBaseVersion := "0.1"
+ThisBuild / organization := "com.kubukoz"
+ThisBuild / organizationName := "Jakub Kozłowski"
+ThisBuild / startYear := Some(2026)
+ThisBuild / licenses := Seq(License.Apache2)
+ThisBuild / developers := List(tlGitHubDev("kubukoz", "Jakub Kozłowski"))
 
 ThisBuild / scalaVersion := scala3Version
-ThisBuild / organization := "ssr"
-ThisBuild / version      := "0.1.0-SNAPSHOT"
+
+// No .scalafmt.conf in this repo yet; keep the formatting gate out of CI rather
+// than reformat the whole existing (Scala 3, significant-indentation) codebase.
+ThisBuild / tlCiScalafmtCheck := false
+ThisBuild / tlFatalWarnings := false
+ThisBuild / tlJdkRelease := Some(21)
+
+ThisBuild / githubWorkflowPublishTargetBranches := Seq(
+  RefPredicate.Equals(Ref.Branch("main")),
+  RefPredicate.StartsWith(Ref.Tag("v")),
+)
+
+ThisBuild / mergifyStewardConfig ~= (_.map(_.withMergeMinors(true)))
+
+// Run the sbt-ssr plugin's scripted tests in CI, after the normal build.
+ThisBuild / githubWorkflowBuildPostamble += WorkflowStep.Sbt(
+  List("plugin/scripted"),
+  name = Some("Scripted tests"),
+)
+
+// The Scala Native axis links a real binary during `test`. clang ships on the
+// ubuntu runner and the default GC (Immix) is built into the runtime — only
+// libunwind (exception handling) needs installing.
+ThisBuild / githubWorkflowBuildPreamble += WorkflowStep.Run(
+  List("sudo apt-get update", "sudo apt-get install -y libunwind-dev"),
+  name = Some("Install Scala Native toolchain"),
+  cond = Some("matrix.os == 'ubuntu-22.04'"),
+)
 
 val smithy4sVersion = "0.18.53"
 val jsonrpclibVersion = "0.1.2"
@@ -12,9 +46,10 @@ lazy val root = (project in file("."))
   .aggregate(swiftCodegen)
   .aggregate(ssr.projectRefs *)
   .aggregate(demos.projectRefs *)
+  .aggregate(plugin)
+  .enablePlugins(NoPublishPlugin)
   .settings(
-    name := "ssr-root",
-    publish / skip := true,
+    name := "ssr-root"
   )
 
 // ---------------------------------------------------------------------------
@@ -22,6 +57,7 @@ lazy val root = (project in file("."))
 // ---------------------------------------------------------------------------
 
 lazy val swiftCodegen = (project in file("codegen/swift-plugin"))
+  .enablePlugins(NoPublishPlugin)
   .settings(
     name := "swift-codegen",
     Compile / scalaSource := baseDirectory.value,
@@ -164,6 +200,7 @@ lazy val ssr = (projectMatrix in file("scala/lib"))
 
 lazy val demos = (projectMatrix in file("scala/demos"))
   .dependsOn(ssr)
+  .enablePlugins(NoPublishPlugin)
   .settings(commonScalaSettings)
   .settings(
     name := "ssr-demos",
@@ -177,6 +214,27 @@ lazy val demos = (projectMatrix in file("scala/demos"))
   .jvmPlatform(scalaVersions = Seq(scala3Version))
   .nativePlatform(
     scalaVersions = Seq(scala3Version),
+  )
+
+// ---------------------------------------------------------------------------
+// sbt-ssr: the packaging plugin. Bundles a user's Scala app + the prebuilt
+// Swift host into a macOS .app. sbt plugins are Scala 2.12 only, so this lives
+// on its own axis and does NOT dependOn the Scala 3 `ssr` module (it only
+// orchestrates packaging — it has no compile-time need for the library).
+// ---------------------------------------------------------------------------
+
+lazy val plugin = (project in file("sbt-ssr"))
+  .enablePlugins(SbtPlugin)
+  .settings(
+    name := "sbt-ssr",
+    scalaVersion := scala212Version,
+    crossScalaVersions := Seq(scala212Version),
+    // The .app fallback contract the host relies on (see host self-locating
+    // fallback): child binary `ssr-child`, assets under `assets/`. The plugin
+    // stakes these names, the host reads them.
+    pluginCrossBuild / sbtVersion := "1.9.8",
+    scriptedLaunchOpts ++= Seq("-Xmx1024M", "-Dplugin.version=" + version.value),
+    scriptedBufferLog := false,
   )
 
 lazy val demosJVM    = demos.jvm(scala3Version)

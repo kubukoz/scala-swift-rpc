@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# stub Scala child — the scripted test only checks it is staged, never runs it
+echo "ssr-child stub"

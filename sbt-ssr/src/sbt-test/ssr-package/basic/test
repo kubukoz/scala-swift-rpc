@@ -1,0 +1,9 @@
+# assemble the .app and check the full bundle contract
+> ssrPackage
+> checkLayout
+
+# re-packaging is clean: a stray file from a prior layout is removed
+> plantStray
+> ssrPackage
+> checkNoStray
+> checkLayout
