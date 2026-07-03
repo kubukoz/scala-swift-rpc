@@ -881,6 +881,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // Retains the click handler for a menu-less status item — NSButton holds
     // its target weakly.
     private var statusButtonHandler: StatusButtonHandler?
+    // The current activation policy. A `.regular` app quits when its last window
+    // closes; a menu-bar agent (`.accessory` / `.prohibited`) must NOT — it lives
+    // in the status bar and opens/closes its windows freely.
+    private var activationPolicy: ActivationPolicy = .regular
+    // Set once the initial mount completes. Before that, the boot sequence itself
+    // touches window visibility (`ui/window { visible: false }` → orderOut) and
+    // the activation policy hasn't necessarily been applied yet — so we never
+    // quit-on-last-window during startup, only after the app is fully up.
+    private var appStarted = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = NSMenu()
@@ -911,12 +920,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "SSR"
-        window.titlebarAppearsTransparent = true
+        // Closing the window must HIDE it, not destroy it: a menu-bar app reopens
+        // the same window on demand (e.g. a progress panel). Without this an
+        // NSWindow is released on close and the next show operates on a dead
+        // reference — the window silently never reappears.
+        window.isReleasedWhenClosed = false
 
         let container = NSView()
         window.contentView = container
@@ -926,6 +939,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         bridge.onMount { [weak self] params in
             self?.renderer.mount(params.root)
+            self?.appStarted = true
         }
         bridge.onPatch { [weak self] params in
             self?.renderer.patch(id: params.id, op: params.op, value: params.value, style: params.style)
@@ -1013,7 +1027,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        // Only a fully-started, windowed (`.regular`) app quits when its last
+        // window closes. A menu-bar agent (`.accessory` / `.prohibited`) does NOT
+        // — it has no persistent window and must survive closing a transient one
+        // (e.g. a progress panel). The `appStarted` guard also covers the boot
+        // window-visibility churn before the activation policy is applied. Either
+        // kind can still quit explicitly (Cmd-Q / the Quit menu → `ui/quit`).
+        appStarted && activationPolicy == .regular
     }
 
     private func applyWindow(_ spec: SetWindowInput) {
@@ -1023,7 +1043,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             window.orderOut(nil)
             return
         }
-        let wasVisible = window.isVisible
         let size = NSSize(width: spec.width, height: spec.height)
         let screen = resolveScreen(spec.screen) ?? window.screen ?? NSScreen.main
         let visible = screen?.visibleFrame ?? window.frame
@@ -1032,11 +1051,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let frame = NSRect(x: originX, y: originY, width: size.width, height: size.height)
         window.setFrame(frame, display: false)
 
-        if !wasVisible {
-            window.makeKeyAndOrderFront(nil)
-        } else {
-            window.displayIfNeeded()
-        }
+        // Always bring the window forward on a visible=true request, whether it
+        // was hidden or already open behind other apps — "show" means "show now".
+        // An accessory (menu-bar) app isn't the active app, so ordering front
+        // isn't enough; activate first so the window actually surfaces and can
+        // take focus.
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
         sendWindowFrame()
     }
 
@@ -1076,6 +1097,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func applyActivationPolicy(_ policy: ActivationPolicy) {
+        activationPolicy = policy
         switch policy {
         case .regular: NSApp.setActivationPolicy(.regular)
         case .accessory: NSApp.setActivationPolicy(.accessory)
