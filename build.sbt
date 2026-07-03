@@ -36,6 +36,7 @@ val smithyVersion = "1.71.0"
 lazy val root = (project in file("."))
   .aggregate(swiftCodegen)
   .aggregate(ssr.projectRefs *)
+  .aggregate(testkit.projectRefs *)
   .aggregate(demos.projectRefs *)
   .aggregate(plugin)
   .enablePlugins(NoPublishPlugin)
@@ -190,6 +191,34 @@ lazy val ssr = (projectMatrix in file("scala/lib"))
   .jvmPlatform(scalaVersions = Seq(scala3Version))
   .nativePlatform(
     scalaVersions = Seq(scala3Version),
+  )
+
+// ---------------------------------------------------------------------------
+// ssr-testkit: a headless, in-process test harness for SSR apps. Builds the
+// component tree through the real runtime path with a recording UiCommands in
+// place of the JSON-RPC channel — no Swift host, no window, no stolen focus.
+// Published as a Test-scope dependency for downstream apps.
+// ---------------------------------------------------------------------------
+
+lazy val testkit = (projectMatrix in file("scala/testkit"))
+  .dependsOn(ssr)
+  .settings(commonScalaSettings)
+  .settings(
+    name := "ssr-testkit",
+    Compile / scalaSource := (ThisBuild / baseDirectory).value / "scala" / "testkit",
+    Compile / unmanagedSources / excludeFilter :=
+      excludeAxisTarget((ThisBuild / baseDirectory).value / "scala" / "testkit")(
+        (Compile / unmanagedSources / excludeFilter).value
+      ),
+    Test / scalaSource := (ThisBuild / baseDirectory).value / "scala" / "testkit-test",
+    libraryDependencies ++= Seq(
+      "org.scalameta" %%% "munit" % "1.2.1" % Test,
+      "org.typelevel" %%% "munit-cats-effect" % "2.2.0" % Test,
+    ),
+  )
+  .jvmPlatform(scalaVersions = Seq(scala3Version))
+  .nativePlatform(
+    scalaVersions = Seq(scala3Version)
   )
 
 lazy val demos = (projectMatrix in file("scala/demos"))

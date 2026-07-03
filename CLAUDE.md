@@ -13,6 +13,8 @@ smithy/                   Wire protocol (source of truth, both sides mirror it)
 codegen/swift-plugin/     Custom smithy-build plugin → WireTypes.swift (sbt module)
 scala/                    Component tree, FRP runtime, JSON-RPC client/server (sbt projectMatrix)
 sbt-ssr/                  The packaging plugin (Scala 2.12): bundles a user app + host into a .app
+scala/testkit/            ssr-testkit — headless in-process test harness (projectMatrix, published)
+scripts/ssr-uitest.swift  AX-based real-host UI driver (dump / read / click)
 swift/main.swift          AppKit host: spawns Scala, renders Nodes, emits events
   generated/              Swift wire types from smithy plugin — gitignored, do not edit
 build/                    Build outputs (ssr-app binary, JVM shim)
@@ -87,6 +89,14 @@ Both are built on the private `MenuRender` helper: `render` assigns fresh ids (v
 **Event flow.** Swift handlers (`ClosureButton`, `TextFieldDelegate`, menu items) send `event/click` / `event/input` with the node id. Scala's `eventService` forwards to `EventBus`, which dispatches by id to handlers registered via `OnEvent` modifiers (`onClick`, `onInput`). `Ctx` carries the bus, the emit client, and a `Signal[IO, WindowFrame]` for the current window geometry.
 
 **Window state.** `event/frame` notifications update the frame signal and persist to `~/.local/state/ssr/window.json` (see `App.loadFrame` / `saveFrame`). On startup, the saved frame becomes the initial `SetWindowInput`.
+
+## Testing SSR apps
+
+Two tiers, headless-first. Both let you drive an app without babysitting clicks by hand (see the ui-testing memory for why real event delivery matters).
+
+**In-process harness (`ssr-testkit`, `scala/testkit/`)** — the default, 90% case. `TestHarness.of(factory): Resource[IO, TestHarness]` builds the component tree through the *real* runtime path (`Component.build` + `markMounted`, reactive window/menu/status background fibers) but swaps a **recording `UiCommands`** (`RecordedCommands`, captures `mount`/`patch`/`setWindow`/`setMenu`/`setStatusItem`/`quit` into a `Recorded`) in for the JSON-RPC channel. No Swift host, no window, no stolen focus, cross-platform (JVM + Native under `sbt testkit3/test` / `testkitNative3/test`). Drive events (`click`/`input`/`toggle`/`setFrame` — routed straight into the `EventBus` exactly as `eventService` does); query the live tree (`tree`, `textOf`/`valueOf` by id, `findByText`/`findAll`, `clickText`) or the recorded protocol traffic (`recorded`). Drive methods `settle` after firing — poll the `Node` snapshot to a fixed point (stable for N consecutive reads) — because signal→setText propagation runs in **background fibers**, so a naive read-after-fire races ahead of the update. Published as a Test-scope dep (`com.kubukoz %% ssr-testkit`); `dependsOn(ssr)`. Node ids are runtime-assigned (`n1`…); prefer by-text/by-tag matching in tests. Tests live in `scala/testkit-test/`.
+
+**Real-host AX driver (`scripts/ssr-uitest.swift`)** — the 10% "does it truly render + click" smoke test. Drives the actual running `ssr-app` process via the macOS Accessibility API. Subcommands: `dump <proc>` (AX tree), `read <proc> <role> <title>` (an element's value), `click <proc> <role> <title> [--real] [--drag]`. **The process name is `ssr-app`, not `ssr-host`** (`build/ssr-app` is what `runJVM`/`runNative` launch; a stray `ssr-host` may belong to another app). Default click = `AXPress` — **focus-free** (safe to run in the background, won't steal focus) but bypasses AppKit event delivery. `--real` posts a physical `CGEvent` click at the element center — highest fidelity, catches hit-test/gesture bugs, but **requires the app frontmost** so it briefly steals focus; `--drag` (implies `--real`) nudges the cursor between down/up. Matches title against AXTitle then AXValue (SSR labels expose text as AXValue). Needs Accessibility permission for the driving terminal. Supersedes the old `ax-click`/`cg-click`/`cg-drag-click`/`dump-ax` scripts.
 
 ## Conventions / gotchas
 
