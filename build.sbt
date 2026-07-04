@@ -3,6 +3,47 @@ import scala.scalanative.build.BuildTarget
 val scala3Version = "3.8.3"
 val scala212Version = "2.12.21"
 
+// ---------------------------------------------------------------------------
+// iOS cross-compilation (opt-in, and implies the FFI static-library build).
+// Instead of the host macOS triple, Scala Native emits arm64 iOS code and
+// clang compiles / links against an iOS SDK. The resulting `.a` is linked into
+// a UIKit host by the Xcode project under `ios/`. Two flavours:
+//
+//   -Dssr.ios=true         → iPhone Simulator (arm64-apple-ios*-simulator,
+//                            iPhoneSimulator.sdk) — the default dev loop.
+//   -Dssr.ios.device=true  → a physical device (arm64-apple-ios*, iPhoneOS.sdk).
+//                            Needs code signing on the Xcode side.
+//
+// SDK paths are resolved from the active Xcode via `xcrun` at load time so we
+// don't hardcode a version. Min-version and triple can be bumped freely.
+// ---------------------------------------------------------------------------
+val iosDevice: Boolean = sys.props.get("ssr.ios.device").contains("true")
+// `iosSim` stays the umbrella "are we cross-compiling for iOS at all?" flag —
+// true for either flavour — so the nativeConfig / mainClass guards below apply
+// to both without churn. `iosDevice` then picks the device triple/sysroot.
+val iosSim: Boolean = sys.props.get("ssr.ios").contains("true") || iosDevice
+
+val iosMinVersion = "17.0"
+
+lazy val iosSysroot: String = {
+  val sdk = if (iosDevice) "iphoneos" else "iphonesimulator"
+  scala.sys.process.Process(Seq("xcrun", "--sdk", sdk, "--show-sdk-path")).!!.trim
+}
+
+val iosTriple =
+  if (iosDevice) s"arm64-apple-ios$iosMinVersion"
+  else s"arm64-apple-ios$iosMinVersion-simulator"
+
+// Flags handed to BOTH the clang compile step and the link step: Scala Native
+// shells out to clang for each, so the target/sysroot must be on both. Device
+// uses -mios-version-min; simulator uses -mios-simulator-version-min.
+lazy val iosFlags: Seq[String] = Seq(
+  "-target", iosTriple,
+  if (iosDevice) s"-mios-version-min=$iosMinVersion"
+  else s"-mios-simulator-version-min=$iosMinVersion",
+  "-isysroot", iosSysroot,
+)
+
 ThisBuild / tlBaseVersion := "0.1"
 ThisBuild / organization := "com.kubukoz"
 ThisBuild / organizationName := "Jakub Kozłowski"
@@ -247,10 +288,20 @@ lazy val demos = (projectMatrix in file("scala/demos"))
   .nativePlatform(
     scalaVersions = Seq(scala3Version),
     settings = Seq(
-      // Native-only demo sources: the `@exported ssr_init` FFI entry point so
-      // the host can embed the demo instead of spawning it.
+      // Native-only demo sources: the `@exported ssr_init` FFI entry points so
+      // the host can embed a demo instead of spawning it.
       Compile / unmanagedSourceDirectories +=
         (ThisBuild / baseDirectory).value / "scala" / "demos-native",
+      // Exactly one `@exported ssr_init` may be linked (duplicate C symbol
+      // otherwise). `LandmarksFfi` is the macOS FFI entry; `CounterFfi` is the
+      // minimal iOS one. Select by build mode: iOS drops Landmarks (its FFI
+      // entry *and* its whole component tree, which pulls in image assets),
+      // everything else drops the iOS counter.
+      Compile / unmanagedSources / excludeFilter := {
+        val prev = (Compile / unmanagedSources / excludeFilter).value
+        if (iosSim) prev || new SimpleFileFilter(_.getName == "LandmarksFfi.scala")
+        else prev || new SimpleFileFilter(_.getName == "CounterFfi.scala")
+      },
       // With -Dssr.ffi=true, link a static library (libssr-demos.a exporting
       // ssr_init + ScalaNativeInit) for the host to link straight into its
       // binary, instead of a standalone executable. Default (unset) keeps the
@@ -263,7 +314,24 @@ lazy val demos = (projectMatrix in file("scala/demos"))
       // `ssr_init()` — see swift/main.swift.
       nativeConfig := {
         val cfg = nativeConfig.value
-        if (sys.props.get("ssr.ffi").contains("true"))
+        // -Dssr.ios=true implies the FFI static-library target (it makes no
+        // sense to cross-compile an iOS executable that spawns a subprocess).
+        if (iosSim) {
+          import scala.scalanative.build.{GC, LTO}
+          cfg
+            .withBuildTarget(BuildTarget.libraryStatic)
+            .withTargetTriple(iosTriple)
+            .withCompileOptions(_ ++ iosFlags)
+            .withLinkingOptions(_ ++ iosFlags)
+            // Bring-up choices: keep the GC/LTO surface minimal on a platform
+            // Scala Native doesn't officially target. Boehm would need an
+            // iOS-cross-built libgc (`gc/gc.h` isn't in the simulator SDK), so
+            // use Immix — Scala Native's own built-in collector, self-contained
+            // with no external headers. Multithreading stays on so the embedded
+            // Cats Effect pool works exactly as it does in the macOS FFI host.
+            .withGC(GC.immix)
+            .withLTO(LTO.none)
+        } else if (sys.props.get("ssr.ffi").contains("true"))
           cfg.withBuildTarget(BuildTarget.libraryStatic)
         else cfg
       },
@@ -273,7 +341,7 @@ lazy val demos = (projectMatrix in file("scala/demos"))
       // mainClass would emit `main` instead, and there'd be no ScalaNativeInit
       // for the host to call.
       Compile / mainClass := {
-        if (sys.props.get("ssr.ffi").contains("true")) None
+        if (iosSim || sys.props.get("ssr.ffi").contains("true")) None
         else (Compile / mainClass).value
       },
       // Also hide the discovered main classes in FFI mode. With mainClass unset
@@ -281,7 +349,7 @@ lazy val demos = (projectMatrix in file("scala/demos"))
       // entry discovery would otherwise prompt "Multiple main classes detected"
       // — which stalls a batch/CI run. An empty list forces the library path.
       Compile / discoveredMainClasses := {
-        if (sys.props.get("ssr.ffi").contains("true")) Nil
+        if (iosSim || sys.props.get("ssr.ffi").contains("true")) Nil
         else (Compile / discoveredMainClasses).value
       },
     ),

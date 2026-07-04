@@ -54,8 +54,20 @@ object App {
 
   private val frameCodec: io.circe.Codec[WindowFrame] = CirceJsonCodec.fromSchema[WindowFrame]
 
+  // Resolve a home directory defensively. On the desktop `user.home` is always
+  // set, but on iOS (Scala Native embedded in a UIKit host) that JVM property
+  // is null, so fall back to the `HOME` env var (the app's sandbox container)
+  // and finally the temp dir. Without this, `App`'s module initializer throws
+  // an NPE at load time — before any app code runs.
+  private val homeDir: String = {
+    val fromProp = Option(java.lang.System.getProperty("user.home"))
+    val fromEnv = Option(java.lang.System.getenv("HOME"))
+    val fromTmp = Option(java.lang.System.getProperty("java.io.tmpdir"))
+    fromProp.orElse(fromEnv).orElse(fromTmp).filter(_.nonEmpty).getOrElse("/tmp")
+  }
+
   private val stateDir: Path =
-    Path(java.lang.System.getProperty("user.home")) / ".local" / "state" / "ssr"
+    Path(homeDir) / ".local" / "state" / "ssr"
 
   private val stateFile: Path = stateDir / "window.json"
 

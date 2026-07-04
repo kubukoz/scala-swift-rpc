@@ -1,0 +1,81 @@
+# XcodeGen spec for the SSR iOS host.
+#
+# Regenerate the .xcodeproj with:
+#   cd ios && nix run nixpkgs#xcodegen
+#
+# The app embeds the Scala Native app as a static library (FFI transport) — the
+# same single-binary path the macOS host uses under -Dssr.ffi=true, but for
+# arm64-apple-ios-simulator. Build the lib first:
+#   sbt -Dssr.ios=true demosNative3/Compile/nativeLink
+# which produces scala/demos/target/native-3/libssr-demos.a, force-loaded below.
+
+name: SSRiOS
+options:
+  bundleIdPrefix: com.kubukoz.ssr
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  JSONRPC:
+    url: https://github.com/ChimeHQ/JSONRPC
+    exactVersion: 0.9.2
+  LanguageServerProtocol:
+    url: https://github.com/ChimeHQ/LanguageServerProtocol
+    exactVersion: 0.14.1
+
+targets:
+  SSRiOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: SSRiOS/Sources
+      # Reuse the Swift wire types generated from smithy/ui.smithy (shared with
+      # the macOS host — single source of truth, never hand-edited).
+      - path: ../swift/generated/WireTypes.swift
+    dependencies:
+      - package: JSONRPC
+        product: JSONRPC
+      - package: LanguageServerProtocol
+        product: LanguageServerProtocol
+    info:
+      path: SSRiOS/Info.plist
+      properties:
+        # A blank launch screen dict is what makes iOS give the app the full
+        # screen (without it, apps are letterboxed to a small legacy size).
+        UILaunchScreen: {}
+        LSRequiresIPhoneOS: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kubukoz.ssr.SSRiOS
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.9"
+        # Force-load the Scala Native static archive so its exported symbols
+        # (ssr_init, ScalaNativeInit) are pulled in even though nothing is
+        # referenced until runtime. The `.a` is a bare archive with no module,
+        # reached only via @_silgen_name from Bridge.swift.
+        OTHER_LDFLAGS:
+          - -force_load
+          - $(SSR_FFI_LIB)
+        # Default the lib path to the sbt build output; override at build time
+        # (xcodebuild SSR_FFI_LIB=/abs/path) if you relocate it.
+        SSR_FFI_LIB: $(SRCROOT)/../scala/demos/target/native-3/libssr-demos.a
+        # arm64 only — matches the Scala Native archive's single slice (works
+        # for both the arm64 simulator and arm64 devices; the .a is rebuilt per
+        # target, see build.sbt's ssr.ios / ssr.ios.device flags).
+        ARCHS: arm64
+        VALID_ARCHS: arm64
+        # Scala Native's runtime links libc++ and the system unwinder.
+        CLANG_CXX_LIBRARY: libc++
+        # Signing. Simulator builds need none; device builds use automatic
+        # signing with the developer's team. Defaults to the repo owner's
+        # personal team (the one the on-disk provisioning profile was minted
+        # for); override with SSR_DEV_TEAM at generation time or DEVELOPMENT_TEAM
+        # at build time (xcodebuild ... DEVELOPMENT_TEAM=XXXXXXXXXX).
+        # NOTE: this is the *team identifier* (R764GDLUR4), NOT the codesigning
+        # cert's OU (FV3W6D2U53) — those differ for personal teams, and using
+        # the OU gives "No Account for Team".
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: R764GDLUR4

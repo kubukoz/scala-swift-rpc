@@ -1,0 +1,9 @@
+# The Xcode project is generated from project.yml by XcodeGen
+# (cd ios && nix run nixpkgs#xcodegen) — the source of truth is project.yml,
+# same policy as the repo's other generated code (swift/generated, smithy4s).
+SSRiOS.xcodeproj/
+
+# Build outputs and per-user Xcode state.
+build/
+*.xcuserstate
+xcuserdata/
