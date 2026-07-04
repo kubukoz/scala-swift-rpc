@@ -143,12 +143,18 @@ func ssr_init() -> UnsafeMutableRawPointer
 //   offset 0 : Int64 capacity   (power of two)
 //   offset 8 : Int64 head       (read cursor, free-running)
 //   offset 16: Int64 tail       (write cursor, free-running)
-//   offset 24: UInt8 data[capacity]
+//   offset 24: Int64 sem        (Mach semaphore handle — the not-empty doorbell)
+//   offset 32: UInt8 data[capacity]
+//
+// `sem` is a Mach semaphore created by the Scala side in `ssr_init`; both sides
+// share it. The producer `semaphore_signal`s it after publishing bytes; a
+// consumer that sees the ring empty `semaphore_wait`s on it instead of polling.
+// Zero idle wakeups; recheck-after-wake makes it race-free.
 private final class Ring {
     private let base: UnsafeMutableRawPointer
     private let capacity: Int
     private let mask: Int
-    private let dataOffset = 24
+    private let dataOffset = 32
 
     init(base: UnsafeMutableRawPointer) {
         self.base = base
@@ -164,6 +170,19 @@ private final class Ring {
         get { Int(base.load(fromByteOffset: 16, as: Int64.self)) }
         set { base.storeBytes(of: Int64(newValue), toByteOffset: 16, as: Int64.self) }
     }
+
+    // The not-empty doorbell, created by the Scala side and shared via the
+    // header at offset 24 (stored in an 8-byte slot; the handle is 32-bit).
+    private var sem: semaphore_t {
+        semaphore_t(truncatingIfNeeded: base.load(fromByteOffset: 24, as: Int64.self))
+    }
+
+    // Producer: wake a consumer parked in `awaitData`. Called after publishing.
+    func signal() { _ = semaphore_signal(sem) }
+
+    // Consumer: block until the producer signals. Only called on an observed
+    // empty ring; returns on any wake, so the caller re-reads.
+    func awaitData() { _ = semaphore_wait(sem) }
 
     private func byte(at index: Int) -> UnsafeMutableRawPointer {
         base.advanced(by: dataOffset + (index & mask))
@@ -197,6 +216,8 @@ private final class Ring {
                 i += 1
             }
         }
+        // Wake a consumer waiting in `awaitData`. Signal AFTER publishing.
+        signal()
     }
 }
 
@@ -228,13 +249,16 @@ private final class FfiTransport {
         }
 
         let (stream, continuation) = AsyncStream<Data>.makeStream()
-        // Poll the out-ring; 1ms matches the Scala side's idle sleep.
+        // Drain the out-ring, blocking on the ring's doorbell when empty instead
+        // of polling. Zero idle wakeups; the Scala producer signals the
+        // semaphore after each write. On wake we re-read, so a spurious wake or
+        // a signal that raced ahead is harmless.
         pollQueue.async {
             while true {
                 if let data = outRing.read() {
                     continuation.yield(data)
                 } else {
-                    Thread.sleep(forTimeInterval: 0.001)
+                    outRing.awaitData()
                 }
             }
         }

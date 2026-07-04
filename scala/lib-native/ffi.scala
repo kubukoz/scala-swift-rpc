@@ -39,6 +39,26 @@ private object GCState {
   def setMutatorThreadState(newState: CInt): Unit = extern
 }
 
+// Mach semaphores — the Darwin-native, iOS-safe wakeup primitive. Unlike POSIX
+// unnamed semaphores (`sem_init`, unsupported on Darwin) these are opaque
+// kernel handles (an int-sized port name), so we can store one in each ring's
+// header without embedding a platform-sized struct. They back the ring
+// doorbells: a producer `semaphore_signal`s after writing; an empty consumer
+// `semaphore_wait`s until woken — no polling, zero idle wakeups. All live in
+// libSystem, always linked. The current task port comes from `task_self_trap()`
+// — a real libsystem *function* (in __TEXT). We deliberately do NOT bind the
+// `mach_task_self()` macro's underlying `mach_task_self_`, which is a __DATA
+// global: an `@extern def` compiles to a *call*, so reading it that way jumps
+// into data and traps (EXC_BAD_ACCESS). `task_self_trap` returns the same port.
+@extern
+private object Mach {
+  // semaphore_create(task, &sem, policy, value) — SYNC_POLICY_FIFO = 0.
+  def semaphore_create(task: CInt, sem: Ptr[CInt], policy: CInt, value: CInt): CInt = extern
+  def semaphore_signal(sem: CInt): CInt = extern
+  def semaphore_wait(sem: CInt): CInt = extern
+  def task_self_trap(): CInt = extern
+}
+
 // ============================================================================
 // FFI transport (Scala Native only).
 //
@@ -68,7 +88,15 @@ private object GCState {
 //   offset 0  : Long capacity   (data byte count, power of two)
 //   offset 8  : Long head       (read index, monotonically increasing)
 //   offset 16 : Long tail       (write index, monotonically increasing)
-//   offset 24 : data[capacity]
+//   offset 24 : Long sem        (Mach semaphore handle — the not-empty doorbell)
+//   offset 32 : data[capacity]
+//
+// `sem` is the ring's "data available" doorbell (see `Mach`): the producer
+// signals it after publishing bytes; a consumer that finds the ring empty waits
+// on it instead of spinning. Signal-after-publish + recheck-after-wake makes it
+// race-free (a signal landing between the empty-check and the wait is absorbed
+// by the semaphore's count, so no wakeup is lost). Stored as a Long for a
+// stable 8-byte slot even though the handle itself is a 32-bit port name.
 //
 // head/tail are free-running counters; the live region is [head, tail) and the
 // physical slot for index i is data[i & (capacity - 1)]. A single producer
@@ -80,8 +108,20 @@ private object GCState {
 private final class SpscRing(val base: Ptr[Byte], val capacity: Long) {
   private val headPtr: Ptr[Long] = (base + 8).asInstanceOf[Ptr[Long]]
   private val tailPtr: Ptr[Long] = (base + 16).asInstanceOf[Ptr[Long]]
-  private val data: Ptr[Byte] = base + 24
+  private val semPtr: Ptr[CInt] = (base + 24).asInstanceOf[Ptr[CInt]]
+  private val data: Ptr[Byte] = base + 32
   private val mask: Long = capacity - 1
+
+  private def sem: CInt = !semPtr
+
+  // Producer: wake a consumer parked in `awaitData`. Cheap (no-op fast path in
+  // the kernel when no waiter); called after publishing bytes.
+  def signal(): Unit = { val _ = Mach.semaphore_signal(sem) }
+
+  // Consumer: block until the producer signals. Only called when the ring is
+  // already observed empty. Returns on any wake (including spurious
+  // KERN_ABORTED) — the caller re-reads, so a false wake just loops back here.
+  def awaitData(): Unit = { val _ = Mach.semaphore_wait(sem) }
 
   // head/tail are single-writer counters. The producer writes the data byte
   // then bumps tail; the consumer reads head, reads the data, then bumps head.
@@ -118,6 +158,7 @@ private final class SpscRing(val base: Ptr[Byte], val capacity: Long) {
 
   // Producer side: write the whole chunk, blocking (spin) while the ring is
   // full. Messages are small and the consumer is fast, so contention is rare.
+  // Signals the doorbell once at the end so a parked consumer wakes.
   def write(bytes: Array[Byte]): Unit = {
     var i = 0
     val n = bytes.length
@@ -137,6 +178,8 @@ private final class SpscRing(val base: Ptr[Byte], val capacity: Long) {
         i += 1
       }
     }
+    // Wake a consumer waiting in `awaitData`. Signal AFTER publishing all bytes.
+    signal()
   }
 }
 
@@ -144,32 +187,48 @@ private object SpscRing {
   // 1 MiB of data per ring by default — comfortably larger than any single
   // mount snapshot, and cheap.
   val Capacity: Long = 1L << 20
-  val HeaderBytes: Long = 24
+  val HeaderBytes: Long = 32
 
   def alloc(): SpscRing = {
     val total = HeaderBytes + Capacity
     val base = stdlib.malloc(total)
-    // zero the header (capacity/head/tail)
+    // zero the header (capacity/head/tail/sem)
     val cap = base.asInstanceOf[Ptr[Long]]
     !cap = Capacity
     !((base + 8).asInstanceOf[Ptr[Long]]) = 0L
     !((base + 16).asInstanceOf[Ptr[Long]]) = 0L
-    new SpscRing(base, Capacity)
+    !((base + 24).asInstanceOf[Ptr[Long]]) = 0L
+    val ring = new SpscRing(base, Capacity)
+    // Create the not-empty doorbell (FIFO policy, initial count 0) and store
+    // its handle in the header at offset 24 for the consumer on either side.
+    val semSlot = (base + 24).asInstanceOf[Ptr[CInt]]
+    val rc = Mach.semaphore_create(Mach.task_self_trap(), semSlot, 0, 0)
+    if (rc != 0)
+      throw new RuntimeException(s"semaphore_create failed: $rc")
+    ring
   }
 }
 
 // A Transport backed by two SPSC rings. Reading from the host = draining the
 // in-ring; writing = pushing into the out-ring.
 private final class FfiTransport(inRing: SpscRing, outRing: SpscRing) extends Transport {
-  import scala.concurrent.duration.*
 
+  // Read the in-ring, blocking on its doorbell when empty rather than polling.
+  // Runs on CE's blocking pool (`IO.blocking`), so a parked thread never stalls
+  // a GC safepoint — same property the old `IO.sleep` had, now with zero idle
+  // wakeups. `awaitData` returns on any signal; we loop and re-read, so a
+  // spurious wake or a signal that raced ahead of `read` is harmless.
   def fromHost: Stream[IO, Byte] =
-    Stream
-      .repeatEval(IO.blocking(inRing.read()))
-      .flatMap { arr =>
-        if (arr.isEmpty) Stream.exec(IO.sleep(1.millis))
-        else Stream.chunk(Chunk.array(arr))
+    Stream.repeatEval {
+      IO.blocking {
+        var arr = inRing.read()
+        while (arr.isEmpty) {
+          inRing.awaitData()
+          arr = inRing.read()
+        }
+        arr
       }
+    }.flatMap(arr => Stream.chunk(Chunk.array(arr)))
 
   def toHost: Pipe[IO, Byte, Nothing] =
     _.chunks.foreach(chunk => IO.blocking(outRing.write(chunk.toArray))).drain
