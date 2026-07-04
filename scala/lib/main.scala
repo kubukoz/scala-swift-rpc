@@ -81,7 +81,14 @@ object App {
 
   // Wires up the JSON-RPC channel, builds the App via the factory, mounts
   // it, and pipes stdin/stdout for the lifetime of the process.
-  def bootstrap(factory: SSR => Resource[IO, App]): IO[Unit] = {
+  def bootstrap(factory: SSR => Resource[IO, App]): IO[Unit] =
+    run(factory, Transport.stdio)
+
+  // Transport-agnostic bootstrap. `Transport` supplies the raw byte channels
+  // (inbound framed messages from the host, outbound framed messages to it);
+  // everything above — LSP framing, the FS2 JSON-RPC channel, mount/patch —
+  // is identical whether we're talking over stdio or an in-process FFI bridge.
+  def run(factory: SSR => Resource[IO, App], transport: Transport): IO[Unit] = {
     val program = for {
       bus <- Stream.eval(EventBus.make)
       idGen <- Stream.eval(IdGen.make)
@@ -125,9 +132,9 @@ object App {
       _ <- Stream.resource(windowUpdates.evalMap(sendWindow).compile.drain.background.void)
       _ <- Stream.resource(menuUpdates.evalMap(emit.setMenu).compile.drain.background.void)
       _ <- Stream.resource(statusUpdates.evalMap(sendStatusItem).compile.drain.background.void)
-      stdoutPipe = ch.output.through(lsp.encodeMessages).through(fs2.io.stdout[IO])
-      stdinPipe = fs2.io.stdin[IO](4096).through(lsp.decodeMessages).through(ch.inputOrBounce)
-      _ <- stdinPipe.mergeHaltBoth(stdoutPipe)
+      outPipe = ch.output.through(lsp.encodeMessages).through(transport.toHost)
+      inPipe = transport.fromHost.through(lsp.decodeMessages).through(ch.inputOrBounce)
+      _ <- inPipe.mergeHaltBoth(outPipe)
     } yield ()
 
     program.compile.drain

@@ -1,3 +1,5 @@
+import scala.scalanative.build.BuildTarget
+
 val scala3Version = "3.8.3"
 val scala212Version = "2.12.21"
 
@@ -191,6 +193,13 @@ lazy val ssr = (projectMatrix in file("scala/lib"))
   .jvmPlatform(scalaVersions = Seq(scala3Version))
   .nativePlatform(
     scalaVersions = Seq(scala3Version),
+    settings = Seq(
+      // Native-only sources: the FFI transport + exported C entry points that
+      // let the Swift host embed the Scala app instead of spawning it. Uses
+      // scala.scalanative.* APIs, so it must never reach the JVM axis.
+      Compile / unmanagedSourceDirectories +=
+        (ThisBuild / baseDirectory).value / "scala" / "lib-native",
+    ),
   )
 
 // ---------------------------------------------------------------------------
@@ -237,6 +246,45 @@ lazy val demos = (projectMatrix in file("scala/demos"))
   .jvmPlatform(scalaVersions = Seq(scala3Version))
   .nativePlatform(
     scalaVersions = Seq(scala3Version),
+    settings = Seq(
+      // Native-only demo sources: the `@exported ssr_init` FFI entry point so
+      // the host can embed the demo instead of spawning it.
+      Compile / unmanagedSourceDirectories +=
+        (ThisBuild / baseDirectory).value / "scala" / "demos-native",
+      // With -Dssr.ffi=true, link a static library (libssr-demos.a exporting
+      // ssr_init + ScalaNativeInit) for the host to link straight into its
+      // binary, instead of a standalone executable. Default (unset) keeps the
+      // executable that `runNative` launches.
+      //
+      // Static (single binary, nothing to ship alongside — the App Store / iOS
+      // endgame). Scala Native's runtime bootstrap `ScalaNativeInit` (GC,
+      // threads) normally runs from a dylib-only constructor, so with a static
+      // lib the host must call `ScalaNativeInit()` itself once before
+      // `ssr_init()` — see swift/main.swift.
+      nativeConfig := {
+        val cfg = nativeConfig.value
+        if (sys.props.get("ssr.ffi").contains("true"))
+          cfg.withBuildTarget(BuildTarget.libraryStatic)
+        else cfg
+      },
+      // In FFI (library) mode there is no `main` entry: Scala Native only emits
+      // the runtime bootstrap `ScalaNativeInit` when NO main class is set —
+      // `entry.fold(genLibraryInit)(genMain)` in the toolchain. Keeping a
+      // mainClass would emit `main` instead, and there'd be no ScalaNativeInit
+      // for the host to call.
+      Compile / mainClass := {
+        if (sys.props.get("ssr.ffi").contains("true")) None
+        else (Compile / mainClass).value
+      },
+      // Also hide the discovered main classes in FFI mode. With mainClass unset
+      // AND two candidates present (LandmarksMain + LandmarksFfi), nativeLink's
+      // entry discovery would otherwise prompt "Multiple main classes detected"
+      // — which stalls a batch/CI run. An empty list forces the library path.
+      Compile / discoveredMainClasses := {
+        if (sys.props.get("ssr.ffi").contains("true")) Nil
+        else (Compile / discoveredMainClasses).value
+      },
+    ),
   )
 
 // ---------------------------------------------------------------------------
@@ -305,4 +353,54 @@ runNative := {
   val host = swiftBuild.value
   val nativeBin = (demosNative / Compile / nativeLink).value
   launchHost(host, nativeBin, streams.value.log, (ThisBuild / baseDirectory).value)
+}
+
+// ---------------------------------------------------------------------------
+// FFI (embedded) build & run. The Scala Native app is linked into the Swift
+// host as a static library exporting `ssr_init`; no subprocess. This is the
+// single-binary path toward App Store / iOS distribution.
+//
+// The native-library build target is gated behind -Dssr.ffi=true (see the
+// demos native `nativeConfig`), so this task chain must be run in an sbt
+// launched with that flag:
+//
+//   sbt -Dssr.ffi=true runFfi
+// ---------------------------------------------------------------------------
+
+lazy val runFfi = taskKey[Unit]("Build the embedded (FFI) host with the Scala app linked in, and launch it")
+
+def buildFfiHost(swiftDir: File, staticLib: File, log: sbt.util.Logger): File = {
+  if (!staticLib.getName.endsWith(".a"))
+    sys.error(s"expected a static library (.a), got $staticLib — run with -Dssr.ffi=true")
+  log.info(s"swift build -c release (FFI, linking ${staticLib.getName})")
+  val rc = scala.sys.process
+    .Process(
+      Seq("swift", "build", "--package-path", swiftDir.getAbsolutePath, "-c", "release"),
+      swiftDir,
+      "SSR_FFI_LIB" -> staticLib.getAbsolutePath,
+    )
+    .!(scala.sys.process.ProcessLogger(log.info(_), log.error(_)))
+  if (rc != 0) sys.error(s"swift build (FFI) failed (exit $rc)")
+  val built = swiftDir / ".build" / "release" / "ssr-host"
+  if (!built.exists) sys.error(s"swift build did not produce $built")
+  built
+}
+
+runFfi := {
+  if (!sys.props.get("ssr.ffi").contains("true"))
+    sys.error("runFfi requires the static-library build target — start sbt with -Dssr.ffi=true")
+  val log = streams.value.log
+  val baseDir = (ThisBuild / baseDirectory).value
+  val swiftDir = (ThisBuild / swiftSourceDir).value
+  // Ensure the Swift wire types exist before building the host.
+  val _ = swiftCodegenOutput.value
+  val staticLib = (demosNative / Compile / nativeLink).value
+  val host = buildFfiHost(swiftDir, staticLib, log)
+  val env = Seq(
+    "SSR_FFI"        -> "1",
+    "SSR_ASSETS_DIR" -> (baseDir / "assets").getAbsolutePath,
+  )
+  log.info(s"launching embedded host $host")
+  val rc = scala.sys.process.Process(Seq(host.getAbsolutePath), baseDir, env *).!
+  if (rc != 0) sys.error(s"host exited $rc")
 }

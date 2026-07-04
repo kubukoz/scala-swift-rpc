@@ -15,10 +15,16 @@ import UserNotifications
 // that drains the session's event stream and dispatches by method name.
 
 final class JSONRPCBridge {
-    private let process = Process()
-    private let stdinPipe = Pipe()
-    private let stdoutPipe = Pipe()
+    // Present only in subprocess (stdio) mode. In embedded (FFI) mode the Scala
+    // app is linked into this binary and there is no child process — see
+    // `FfiTransport` and `JSONRPCBridge.embedded()`.
+    private let process: Process?
     private let session: JSONRPCSession
+    #if SSR_FFI
+    // Retains the embedded transport (its background poller) for the bridge's
+    // lifetime in FFI mode; nil in subprocess mode.
+    private let ffi: FfiTransport?
+    #endif
 
     typealias NotificationHandler = (Data) -> Void
     typealias RequestHandler = (Data) async throws -> Data
@@ -26,7 +32,24 @@ final class JSONRPCBridge {
     private var notificationHandlers: [String: NotificationHandler] = [:]
     private var requestHandlers: [String: RequestHandler] = [:]
 
-    init(executable: String, arguments: [String]) {
+    #if SSR_FFI
+    private init(process: Process?, ffi: FfiTransport?, channel: DataChannel) {
+        self.process = process
+        self.ffi = ffi
+        self.session = JSONRPCSession(channel: channel.withMessageFraming())
+    }
+    #else
+    private init(process: Process?, channel: DataChannel) {
+        self.process = process
+        self.session = JSONRPCSession(channel: channel.withMessageFraming())
+    }
+    #endif
+
+    // Subprocess transport: spawn `executable` and pipe stdin/stdout.
+    convenience init(executable: String, arguments: [String]) {
+        let process = Process()
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.standardInput = stdinPipe
@@ -34,8 +57,21 @@ final class JSONRPCBridge {
         process.standardError = FileHandle.standardError
 
         let channel = JSONRPCBridge.makeChannel(stdin: stdinPipe, stdout: stdoutPipe)
-        self.session = JSONRPCSession(channel: channel.withMessageFraming())
+        #if SSR_FFI
+        self.init(process: process, ffi: nil, channel: channel)
+        #else
+        self.init(process: process, channel: channel)
+        #endif
     }
+
+    #if SSR_FFI
+    // Embedded (FFI) transport: boot the Scala app linked into this binary and
+    // talk to it over the shared ring buffers `ssr_init` set up. No subprocess.
+    static func embedded() -> JSONRPCBridge {
+        let ffi = FfiTransport()
+        return JSONRPCBridge(process: nil, ffi: ffi, channel: ffi.channel())
+    }
+    #endif
 
     func on<P: Decodable>(_ method: String, _ handler: @escaping (P) -> Void) {
         notificationHandlers[method] = { data in
@@ -62,12 +98,15 @@ final class JSONRPCBridge {
     }
 
     func start() throws {
-        try process.run()
+        // Subprocess mode launches the child; embedded mode already booted the
+        // Scala app in `FfiTransport.init` via `ssr_init`. Either way, start
+        // draining the session event stream.
+        try process?.run()
         Task { [weak self] in await self?.run() }
     }
 
     func terminate() {
-        process.terminate()
+        process?.terminate()
     }
 
     func sendNotification<P: Encodable & Sendable>(method: String, params: P) {
@@ -163,6 +202,149 @@ final class JSONRPCBridge {
         return DataChannel(writeHandler: write, dataSequence: stream)
     }
 }
+
+// MARK: - FFI transport (embedded Scala Native library)
+//
+// The embedded build links the Scala app into this binary as a static library
+// exporting a single C function:
+//
+//   void* ssr_init(void)
+//
+// which allocates two shared ring buffers, boots the Scala app on its own
+// thread, and returns a handle. The handle is a struct of two pointers —
+// { inRing*, outRing* } — that we read at fixed offsets. Each ring is laid out
+// (agreed with scala/lib-native/ffi.scala):
+//
+//   offset 0  : Int64 capacity   (power of two)
+//   offset 8  : Int64 head       (read cursor, free-running)
+//   offset 16 : Int64 tail       (write cursor, free-running)
+//   offset 24 : UInt8 data[capacity]
+//
+// inRing:  host -> Scala. Swift is the producer (advances tail).
+// outRing: Scala -> host. Swift is the consumer (advances head).
+#if SSR_FFI
+// Scala Native's runtime bootstrap (GC, threads). For a dylib this runs from a
+// load-time constructor, but we link the app as a static archive, so the host
+// must call it exactly once before touching any exported Scala function. Emits
+// nonzero on failure.
+@_silgen_name("ScalaNativeInit")
+func ScalaNativeInit() -> Int32
+
+@_silgen_name("ssr_init")
+func ssr_init() -> UnsafeMutableRawPointer
+
+// A single-producer/single-consumer view over one shared ring. `producing`
+// picks which cursor this side owns: a producer advances tail and never moves
+// head; a consumer advances head and never moves tail.
+private final class Ring {
+    private let base: UnsafeMutableRawPointer
+    private let capacity: Int
+    private let mask: Int
+    private let dataOffset = 24
+
+    init(base: UnsafeMutableRawPointer) {
+        self.base = base
+        self.capacity = Int(base.load(fromByteOffset: 0, as: Int64.self))
+        self.mask = self.capacity - 1
+    }
+
+    // Atomic-ish 64-bit cursor access. Single-writer per cursor + aligned
+    // 64-bit loads/stores give us the ordering we need on arm64/x86_64.
+    private var head: Int {
+        get { Int(base.load(fromByteOffset: 8, as: Int64.self)) }
+        set { base.storeBytes(of: Int64(newValue), toByteOffset: 8, as: Int64.self) }
+    }
+    private var tail: Int {
+        get { Int(base.load(fromByteOffset: 16, as: Int64.self)) }
+        set { base.storeBytes(of: Int64(newValue), toByteOffset: 16, as: Int64.self) }
+    }
+
+    private func byte(at index: Int) -> UnsafeMutableRawPointer {
+        base.advanced(by: dataOffset + (index & mask))
+    }
+
+    // Consumer: drain all currently-available bytes, or nil if empty.
+    func read() -> Data? {
+        let h = head
+        let t = tail
+        let avail = t - h
+        if avail <= 0 { return nil }
+        var out = Data(count: avail)
+        out.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) in
+            for i in 0..<avail {
+                dst[i] = byte(at: h + i).load(as: UInt8.self)
+            }
+        }
+        head = h + avail  // publish consumption after copying
+        return out
+    }
+
+    // Producer: write the whole buffer, spinning while the ring is full.
+    func write(_ data: Data) {
+        data.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
+            var i = 0
+            while i < src.count {
+                let t = tail
+                if t - head >= capacity {
+                    // full — let the consumer catch up
+                    continue
+                }
+                byte(at: t).storeBytes(of: src[i], as: UInt8.self)
+                tail = t + 1  // publish this byte after writing it
+                i += 1
+            }
+        }
+    }
+}
+
+// Boots the embedded Scala app and exposes a DataChannel over its rings.
+private final class FfiTransport {
+    private let inRing: Ring
+    private let outRing: Ring
+    private let pollQueue = DispatchQueue(label: "ssr.ffi.poll")
+
+    init() {
+        // Bring up the Scala Native runtime before the first exported call.
+        let rc = ScalaNativeInit()
+        if rc != 0 {
+            FileHandle.standardError.write("ScalaNativeInit failed (\(rc))\n".data(using: .utf8)!)
+        }
+        let handle = ssr_init()
+        // Handle layout: { inRing*, outRing* } — two raw pointers.
+        let inPtr = handle.load(fromByteOffset: 0, as: UnsafeMutableRawPointer.self)
+        let outPtr = handle.load(fromByteOffset: MemoryLayout<UnsafeMutableRawPointer>.size,
+                                 as: UnsafeMutableRawPointer.self)
+        self.inRing = Ring(base: inPtr)
+        self.outRing = Ring(base: outPtr)
+    }
+
+    func channel() -> DataChannel {
+        let inRing = self.inRing
+        let outRing = self.outRing
+
+        let write: DataChannel.WriteHandler = { data in
+            // Ring.write only spins when full; safe to call inline.
+            inRing.write(data)
+        }
+
+        let (stream, continuation) = AsyncStream<Data>.makeStream()
+        // Poll the out-ring for messages from Scala. There is no readability
+        // source across FFI, so we poll on a background queue; 1ms matches the
+        // Scala side's idle sleep and keeps latency imperceptible.
+        pollQueue.async {
+            while true {
+                if let data = outRing.read() {
+                    continuation.yield(data)
+                } else {
+                    Thread.sleep(forTimeInterval: 0.001)
+                }
+            }
+        }
+
+        return DataChannel(writeHandler: write, dataSequence: stream)
+    }
+}
+#endif  // SSR_FFI
 
 // Carries pre-encoded JSON through `JSONRPCSession`'s `Encodable & Sendable`
 // result slot without a second round-trip through JSONEncoder.
@@ -934,7 +1116,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let container = NSView()
         window.contentView = container
 
+        // SSR_FFI=1 selects the embedded transport: the Scala app is linked
+        // into this binary (no subprocess), talking over shared ring buffers.
+        // Anything else uses the classic subprocess + stdio transport resolved
+        // above.
+        #if SSR_FFI
+        if env["SSR_FFI"] == "1" {
+            bridge = JSONRPCBridge.embedded()
+        } else {
+            bridge = JSONRPCBridge(executable: executable, arguments: arguments)
+        }
+        #else
         bridge = JSONRPCBridge(executable: executable, arguments: arguments)
+        #endif
         renderer = Renderer(container: container, bridge: bridge)
 
         bridge.onMount { [weak self] params in

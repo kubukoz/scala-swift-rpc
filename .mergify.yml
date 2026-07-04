@@ -63,3 +63,19 @@ pull_request_rules:
       add:
       - swift-plugin
       remove: []
+- name: Label testkit3 PRs
+  conditions:
+  - files~=^.sbt/matrix/testkit3/
+  actions:
+    label:
+      add:
+      - testkit3
+      remove: []
+- name: Label testkitNative3 PRs
+  conditions:
+  - files~=^.sbt/matrix/testkitNative3/
+  actions:
+    label:
+      add:
+      - testkitNative3
+      remove: []
