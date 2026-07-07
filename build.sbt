@@ -23,6 +23,16 @@ val iosDevice: Boolean = sys.props.get("ssr.ios.device").contains("true")
 // to both without churn. `iosDevice` then picks the device triple/sysroot.
 val iosSim: Boolean = sys.props.get("ssr.ios").contains("true") || iosDevice
 
+// The FFI transport (shared-memory ring doorbells) binds Mach kernel calls
+// (semaphore_create/signal/wait, task_self_trap) that live only in Darwin's
+// libSystem — they don't exist on Linux, so linking the Native test binary on
+// a Linux CI runner fails with "undefined reference to semaphore_signal". FFI
+// is a macOS/iOS-only feature by design (single-binary embedding, the App
+// Store path), and iOS cross-builds only ever run on a Mac, so gating the
+// whole FFI source set on the host OS being macOS keeps Linux CI's Native
+// `test` link clean while leaving the macOS dev + host-release builds intact.
+val isMac: Boolean = scala.util.Properties.isMac
+
 val iosMinVersion = "17.0"
 
 lazy val iosSysroot: String = {
@@ -237,9 +247,11 @@ lazy val ssr = (projectMatrix in file("scala/lib"))
     settings = Seq(
       // Native-only sources: the FFI transport + exported C entry points that
       // let the Swift host embed the Scala app instead of spawning it. Uses
-      // scala.scalanative.* APIs, so it must never reach the JVM axis.
-      Compile / unmanagedSourceDirectories +=
-        (ThisBuild / baseDirectory).value / "scala" / "lib-native",
+      // scala.scalanative.* APIs, so it must never reach the JVM axis — and
+      // Darwin-only Mach calls, so it must never reach a non-macOS Native link
+      // (see `isMac`).
+      Compile / unmanagedSourceDirectories ++=
+        (if (isMac) Seq((ThisBuild / baseDirectory).value / "scala" / "lib-native") else Nil),
     ),
   )
 
@@ -289,9 +301,11 @@ lazy val demos = (projectMatrix in file("scala/demos"))
     scalaVersions = Seq(scala3Version),
     settings = Seq(
       // Native-only demo sources: the `@exported ssr_init` FFI entry points so
-      // the host can embed a demo instead of spawning it.
-      Compile / unmanagedSourceDirectories +=
-        (ThisBuild / baseDirectory).value / "scala" / "demos-native",
+      // the host can embed a demo instead of spawning it. They mix in
+      // `SsrFfiApp` from `lib-native`, so gate them on the same macOS predicate
+      // — on Linux the FFI stack is absent and these would fail to compile.
+      Compile / unmanagedSourceDirectories ++=
+        (if (isMac) Seq((ThisBuild / baseDirectory).value / "scala" / "demos-native") else Nil),
       // Exactly one `@exported ssr_init` may be linked (duplicate C symbol
       // otherwise). `LandmarksFfi` is the macOS FFI entry; `CounterFfi` is the
       // minimal iOS one. Select by build mode: iOS drops Landmarks (its FFI
