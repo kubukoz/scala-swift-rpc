@@ -155,20 +155,27 @@ object TestHarness {
 
     def setFrame(frame: WindowFrame): IO[Unit] = frameRef.set(frame) *> settle
 
-    // Poll the snapshot until it has been stable for `stableFor` consecutive
-    // reads — one stable read is ambiguous (a background fiber may not have
-    // started yet), so we require a short run of no-change before declaring
-    // quiescence. Capped by `budget` so a genuinely-live (self-updating) app
-    // can't hang the test forever.
+    // Poll the snapshot until it has been stable for `stableWindow` of wall
+    // time — reactive propagation runs in background fibers (signal -> setText),
+    // so a just-fired event may not have touched the tree yet when we first
+    // sample. A stable *old* tree is indistinguishable from a truly-quiesced one
+    // by content alone, so we can't trust a tiny 2-3ms window: on a loaded CI
+    // runner the propagation fiber can take longer than that just to get
+    // scheduled, and we'd declare quiescence on the stale tree (the flaky
+    // failure this replaces). Instead require the tree to hold steady for a
+    // comfortably-longer window, and `cede` between polls so pending background
+    // fibers actually get a turn to run before we sample again. Capped by
+    // `budget` so a genuinely-live (self-updating) app can't hang forever.
     def settle: IO[Unit] = {
-      val step = 1.milli
-      val stableFor = 3
+      val step = 2.millis
+      val stableWindow = 50.millis
+      val stableReads = (stableWindow / step).toInt
       def loop(prev: Node, stable: Int, budget: Int): IO[Unit] =
         if (budget <= 0) IO.unit
         else
-          IO.sleep(step) *> tree.flatMap { cur =>
+          IO.cede *> IO.sleep(step) *> tree.flatMap { cur =>
             if (cur != prev) loop(cur, stable = 0, budget - 1)
-            else if (stable + 1 >= stableFor) IO.unit
+            else if (stable + 1 >= stableReads) IO.unit
             else loop(cur, stable + 1, budget - 1)
           }
       tree.flatMap(loop(_, stable = 0, budget = 5000))
