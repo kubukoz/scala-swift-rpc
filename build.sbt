@@ -55,6 +55,15 @@ lazy val iosFlags: Seq[String] = Seq(
 )
 
 ThisBuild / tlBaseVersion := "0.1"
+// MiMA derives its previous-artifact set from every git tag in the base-version
+// series, but tags v0.1.1..v0.1.5 were cut while release CI was broken and never
+// reached Maven Central — only 0.1.0 was ever published. Left to the default,
+// `mimaReportBinaryIssues` tries to download the phantom 0.1.4 and fails with
+// "not found". And 0.1.0 itself is a stale pre-POC baseline the public API has
+// legitimately outgrown (App/SSR/MenuItem constructors all changed), so checking
+// against it just reports noise. The published 0.1.x lineage is effectively a
+// single dead point; reset the baseline and let the next release re-seed it.
+ThisBuild / tlMimaPreviousVersions := Set.empty
 ThisBuild / organization := "com.kubukoz"
 ThisBuild / organizationName := "Jakub Kozłowski"
 ThisBuild / startYear := Some(2026)
